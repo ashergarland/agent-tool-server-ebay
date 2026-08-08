@@ -105,8 +105,16 @@ describe('config validation', () => {
     );
   });
 
-  it('rejects an empty scope list', () => {
-    expect(() => load({ EBAY_OAUTH_SCOPES: '  ' })).toThrow(/at least one OAuth scope/);
+  it('rejects a scope list that contains no usable scopes', () => {
+    // A blank value means "not set" and falls back to the default scope, but a value that is
+    // present and yet yields nothing usable is a genuine misconfiguration.
+    expect(() => load({ EBAY_OAUTH_SCOPES: ',,' })).toThrow(/at least one OAuth scope/);
+  });
+
+  it('falls back to the default scope when the value is blank', () => {
+    expect(load({ EBAY_OAUTH_SCOPES: '  ' }).ebay.scopes).toEqual([
+      'https://api.ebay.com/oauth/api_scope',
+    ]);
   });
 });
 
@@ -161,5 +169,70 @@ describe('production requirements', () => {
     });
     expect(config.isProduction).toBe(true);
     expect(config.ebay.configured).toBe(true);
+  });
+});
+
+/**
+ * Azure Container Apps materialises an unset template value as an empty string, and the first
+ * provisioning pass genuinely has no public URL to supply. Treating those as "not set" is what
+ * keeps the container from exiting at startup on a clean deployment.
+ */
+describe('blank environment values', () => {
+  const deployed = {
+    NODE_ENV: 'production',
+    AUTH_MODE: 'api-key',
+    API_KEYS: 'k'.repeat(32),
+    EBAY_CLIENT_ID: 'id',
+    EBAY_CLIENT_SECRET: 'secret',
+  } satisfies NodeJS.ProcessEnv;
+
+  it('treats an empty PUBLIC_BASE_URL as absent rather than an invalid URL', () => {
+    const config = loadConfig({ ...deployed, PUBLIC_BASE_URL: '' });
+    expect(config.service.publicBaseUrl).toBeUndefined();
+  });
+
+  it('treats empty delivery context values as absent', () => {
+    const config = loadConfig({
+      ...deployed,
+      EBAY_DELIVERY_COUNTRY: '',
+      EBAY_DELIVERY_POSTAL_CODE: '',
+    });
+    expect(config.ebay.deliveryCountry).toBeUndefined();
+    expect(config.ebay.deliveryPostalCode).toBeUndefined();
+  });
+
+  it('ignores whitespace-only values', () => {
+    const config = loadConfig({ ...deployed, EBAY_AFFILIATE_CAMPAIGN_ID: '   ' });
+    expect(config.ebay.affiliateCampaignId).toBeUndefined();
+  });
+
+  it('falls back to the default when an optional enum is blank', () => {
+    const config = loadConfig({ ...deployed, EBAY_MARKETPLACE_ID: '', EBAY_ENVIRONMENT: '' });
+    expect(config.ebay.defaultMarketplaceId).toBe('EBAY_US');
+    expect(config.ebay.environment).toBe('production');
+  });
+
+  it('still rejects a genuinely invalid value', () => {
+    expect(() => loadConfig({ ...deployed, PUBLIC_BASE_URL: 'not-a-url' })).toThrow(
+      ConfigurationError,
+    );
+  });
+
+  it('accepts the exact environment the Container App template produces', () => {
+    const config = loadConfig({
+      NODE_ENV: 'production',
+      PORT: '8080',
+      LOG_LEVEL: 'info',
+      SERVICE_NAME: 'ca-chatgpt-ebay-prod',
+      AUTH_MODE: 'api-key',
+      API_KEYS: 'k'.repeat(32),
+      EBAY_CLIENT_ID: 'id',
+      EBAY_CLIENT_SECRET: 'secret',
+      EBAY_ENVIRONMENT: 'production',
+      EBAY_MARKETPLACE_ID: 'EBAY_US',
+    });
+    expect(config.isProduction).toBe(true);
+    expect(config.ebay.configured).toBe(true);
+    expect(config.service.publicBaseUrl).toBeUndefined();
   });
 });

@@ -63,6 +63,17 @@ resource logAnalytics 'Microsoft.OperationalInsights/workspaces@2023-09-01' exis
   name: last(split(logAnalyticsWorkspaceId, '/'))
 }
 
+// Optional values are omitted entirely rather than passed as empty strings: an empty
+// PUBLIC_BASE_URL or delivery field is "not configured", not "configured to nothing", and the
+// connector validates its environment strictly at startup.
+var optionalEnv = concat(
+  empty(publicBaseUrl) ? [] : [{ name: 'PUBLIC_BASE_URL', value: publicBaseUrl }],
+  empty(ebayDeliveryCountry) ? [] : [{ name: 'EBAY_DELIVERY_COUNTRY', value: ebayDeliveryCountry }],
+  empty(ebayDeliveryPostalCode)
+    ? []
+    : [{ name: 'EBAY_DELIVERY_POSTAL_CODE', value: ebayDeliveryPostalCode }]
+)
+
 resource environment 'Microsoft.App/managedEnvironments@2024-03-01' = {
   name: environmentName
   location: location
@@ -138,21 +149,21 @@ resource app 'Microsoft.App/containerApps@2024-03-01' = {
             cpu: json('0.5')
             memory: '1Gi'
           }
-          env: [
-            { name: 'NODE_ENV', value: 'production' }
-            { name: 'PORT', value: '8080' }
-            { name: 'LOG_LEVEL', value: logLevel }
-            { name: 'SERVICE_NAME', value: appName }
-            { name: 'PUBLIC_BASE_URL', value: publicBaseUrl }
-            { name: 'AUTH_MODE', value: 'api-key' }
-            { name: 'API_KEYS', secretRef: 'connector-api-key' }
-            { name: 'EBAY_CLIENT_ID', secretRef: 'ebay-client-id' }
-            { name: 'EBAY_CLIENT_SECRET', secretRef: 'ebay-client-secret' }
-            { name: 'EBAY_ENVIRONMENT', value: ebayEnvironment }
-            { name: 'EBAY_MARKETPLACE_ID', value: ebayMarketplaceId }
-            { name: 'EBAY_DELIVERY_COUNTRY', value: ebayDeliveryCountry }
-            { name: 'EBAY_DELIVERY_POSTAL_CODE', value: ebayDeliveryPostalCode }
-          ]
+          env: concat(
+            [
+              { name: 'NODE_ENV', value: 'production' }
+              { name: 'PORT', value: '8080' }
+              { name: 'LOG_LEVEL', value: logLevel }
+              { name: 'SERVICE_NAME', value: appName }
+              { name: 'AUTH_MODE', value: 'api-key' }
+              { name: 'API_KEYS', secretRef: 'connector-api-key' }
+              { name: 'EBAY_CLIENT_ID', secretRef: 'ebay-client-id' }
+              { name: 'EBAY_CLIENT_SECRET', secretRef: 'ebay-client-secret' }
+              { name: 'EBAY_ENVIRONMENT', value: ebayEnvironment }
+              { name: 'EBAY_MARKETPLACE_ID', value: ebayMarketplaceId }
+            ],
+            optionalEnv
+          )
           probes: [
             {
               type: 'Liveness'
