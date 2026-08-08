@@ -1,0 +1,368 @@
+import { afterAll, beforeAll, describe, expect, it, vi } from 'vitest';
+import type { Logger } from 'pino';
+import { createApplication, type Application } from '../../src/app.js';
+import { testConfig } from '../helpers/config.js';
+import { createFakeProvider, createTestLogger, makeListing } from '../helpers/fake-provider.js';
+
+const API_KEY = 'test-api-key-that-is-long-enough-000000';
+
+const buildApp = (
+  overrides: Record<string, string | undefined> = {},
+  provider = createFakeProvider(),
+): Application =>
+  createApplication({
+    config: testConfig({ AUTH_MODE: 'api-key', API_KEYS: API_KEY, ...overrides }),
+    logger: createTestLogger() as unknown as Logger,
+    provider,
+  });
+
+describe('HTTP surface', () => {
+  let app: Application;
+
+  beforeAll(async () => {
+    app = buildApp();
+    await app.http.ready();
+  });
+
+  afterAll(async () => {
+    await app.http.close();
+  });
+
+  const auth = { authorization: ['Bearer', API_KEY].join(' ') };
+
+  it('serves an unauthenticated health probe', async () => {
+    const response = await app.http.inject({ method: 'GET', url: '/health' });
+    expect(response.statusCode).toBe(200);
+    expect(response.json()).toMatchObject({ status: 'ok', service: 'chatgpt-ebay' });
+  });
+
+  it('serves version and capability metadata without auth', async () => {
+    const response = await app.http.inject({ method: 'GET', url: '/version' });
+    expect(response.statusCode).toBe(200);
+    expect(response.json()).toMatchObject({
+      version: '1.2.3',
+      capabilities: {
+        authMode: 'api-key',
+        ebayEnvironment: 'production',
+        ebayConfigured: true,
+        defaultMarketplaceId: 'EBAY_US',
+        soldListingData: false,
+      },
+    });
+  });
+
+  it('echoes a request id on every response', async () => {
+    const response = await app.http.inject({
+      method: 'GET',
+      url: '/health',
+      headers: { 'x-request-id': 'trace-me' },
+    });
+    expect(response.headers['x-request-id']).toBe('trace-me');
+  });
+
+  it('rejects unauthenticated tool calls', async () => {
+    const response = await app.http.inject({ method: 'GET', url: '/tools' });
+    expect(response.statusCode).toBe(401);
+    expect(response.json().error).toMatchObject({ code: 'unauthorized', retryable: false });
+  });
+
+  it('rejects an incorrect api key', async () => {
+    const response = await app.http.inject({
+      method: 'GET',
+      url: '/tools',
+      headers: { authorization: ['Bearer', 'wrong-key-wrong-key-wrong-key-wrong'].join(' ') },
+    });
+    expect(response.statusCode).toBe(401);
+  });
+
+  it('rejects a key that is a prefix of the real one', async () => {
+    const response = await app.http.inject({
+      method: 'GET',
+      url: '/tools',
+      headers: { 'x-api-key': API_KEY.slice(0, -1) },
+    });
+    expect(response.statusCode).toBe(401);
+  });
+
+  it('accepts the x-api-key header', async () => {
+    const response = await app.http.inject({
+      method: 'GET',
+      url: '/tools',
+      headers: { 'x-api-key': API_KEY },
+    });
+    expect(response.statusCode).toBe(200);
+  });
+
+  it('lists tools with their schemas', async () => {
+    const response = await app.http.inject({ method: 'GET', url: '/tools', headers: auth });
+    expect(response.statusCode).toBe(200);
+    const body = response.json();
+    expect(body.tools).toHaveLength(4);
+    expect(body.tools[0]).toHaveProperty('inputSchema.type', 'object');
+    expect(body.tools.map((tool: { name: string }) => tool.name)).toEqual([
+      'ebay_get_listing',
+      'ebay_search_listings',
+      'ebay_find_similar_listings',
+      'ebay_compare_listings',
+    ]);
+  });
+
+  it('retrieves a listing from a pasted eBay URL', async () => {
+    const response = await app.http.inject({
+      method: 'POST',
+      url: '/tools/ebay_get_listing',
+      headers: auth,
+      payload: { item: 'https://www.ebay.com/itm/Sony-PS2-Slim/407111131587?hash=abc' },
+    });
+
+    expect(response.statusCode).toBe(200);
+    const body = response.json();
+    expect(body).toMatchObject({ tool: 'ebay_get_listing' });
+    expect(body.result.listing).toMatchObject({
+      legacyItemId: '407111131587',
+      active: true,
+      estimatedDeliveredTotal: { value: 102.49, currency: 'USD' },
+    });
+  });
+
+  it('accepts both a bare payload and an { input } envelope', async () => {
+    const response = await app.http.inject({
+      method: 'POST',
+      url: '/tools/ebay_search_listings',
+      headers: auth,
+      payload: { input: { query: 'sega saturn console' } },
+    });
+
+    expect(response.statusCode).toBe(200);
+    expect(response.json().result.listings).toHaveLength(1);
+  });
+
+  it('returns 400 with validation issues for bad input', async () => {
+    const response = await app.http.inject({
+      method: 'POST',
+      url: '/tools/ebay_get_listing',
+      headers: auth,
+      payload: { item: 12345 },
+    });
+
+    expect(response.statusCode).toBe(400);
+    expect(response.json().error.details.issues[0].path).toBe('item');
+  });
+
+  it('returns 400 for an unparseable eBay reference', async () => {
+    const response = await app.http.inject({
+      method: 'POST',
+      url: '/tools/ebay_get_listing',
+      headers: auth,
+      payload: { item: 'https://www.amazon.com/dp/B00005N5PF' },
+    });
+
+    expect(response.statusCode).toBe(400);
+    expect(response.json().error.code).toBe('bad_request');
+  });
+
+  it('returns 404 for an unknown tool', async () => {
+    const response = await app.http.inject({
+      method: 'POST',
+      url: '/tools/ebay_does_not_exist',
+      headers: auth,
+      payload: {},
+    });
+
+    expect(response.statusCode).toBe(404);
+    expect(response.json().error.code).toBe('not_found');
+  });
+
+  it('serves an OpenAPI document covering every tool', async () => {
+    const response = await app.http.inject({ method: 'GET', url: '/openapi.json' });
+    expect(response.statusCode).toBe(200);
+
+    const document = response.json();
+    expect(document.openapi).toBe('3.1.0');
+    expect(document.info.title).toBe('ChatGPT eBay Connector');
+    expect(document.info.description).toMatch(/active listings only/);
+    for (const tool of app.registry.list()) {
+      expect(document.paths[`/tools/${tool.name}`]).toBeDefined();
+      expect(document.paths[`/tools/${tool.name}`].post['x-openai-isConsequential']).toBe(false);
+      expect(document.paths[`/tools/${tool.name}`].post.operationId).toBe(tool.name);
+    }
+  });
+
+  it('returns 404 in the standard error envelope for unknown routes', async () => {
+    const response = await app.http.inject({ method: 'GET', url: '/nope' });
+    expect(response.statusCode).toBe(404);
+    expect(response.json().error).toMatchObject({ code: 'not_found' });
+  });
+});
+
+describe('upstream error normalisation', () => {
+  it('maps an eBay not_found to a 404 envelope', async () => {
+    const { AppError } = await import('../../src/errors.js');
+    const provider = createFakeProvider();
+    const failing = {
+      ...provider,
+      getListing: () =>
+        Promise.reject(new AppError('not_found', 'getListing: The item was not found.')),
+    };
+    const app = buildApp({}, failing);
+    await app.http.ready();
+
+    const response = await app.http.inject({
+      method: 'POST',
+      url: '/tools/ebay_get_listing',
+      headers: { authorization: ['Bearer', API_KEY].join(' ') },
+      payload: { item: '407111131587' },
+    });
+
+    expect(response.statusCode).toBe(404);
+    expect(response.json().error).toMatchObject({ code: 'not_found', retryable: false });
+    await app.http.close();
+  });
+
+  it('maps an eBay throttle to a retryable 429 envelope', async () => {
+    const { AppError } = await import('../../src/errors.js');
+    const provider = createFakeProvider();
+    const failing = {
+      ...provider,
+      searchListings: () =>
+        Promise.reject(
+          new AppError('rate_limited', 'searchListings: eBay throttled the request', {
+            retryable: true,
+          }),
+        ),
+    };
+    const app = buildApp({}, failing);
+    await app.http.ready();
+
+    const response = await app.http.inject({
+      method: 'POST',
+      url: '/tools/ebay_search_listings',
+      headers: { authorization: ['Bearer', API_KEY].join(' ') },
+      payload: { query: 'ps2' },
+    });
+
+    expect(response.statusCode).toBe(429);
+    expect(response.json().error).toMatchObject({ code: 'rate_limited', retryable: true });
+    await app.http.close();
+  });
+
+  it('maps an unexpected provider failure to a 500 envelope', async () => {
+    const provider = createFakeProvider();
+    const failing = {
+      ...provider,
+      getListing: () => Promise.reject(new Error('unexpected boom')),
+    };
+    const app = buildApp({}, failing);
+    await app.http.ready();
+
+    const response = await app.http.inject({
+      method: 'POST',
+      url: '/tools/ebay_get_listing',
+      headers: { authorization: ['Bearer', API_KEY].join(' ') },
+      payload: { item: '407111131587' },
+    });
+
+    expect(response.statusCode).toBe(500);
+    expect(response.json().error).toMatchObject({ code: 'internal_error' });
+    await app.http.close();
+  });
+
+  it('does not leak internal error messages in production', async () => {
+    vi.stubEnv('NODE_ENV', 'production');
+    const provider = createFakeProvider();
+    const failing = {
+      ...provider,
+      getListing: () => Promise.reject(new Error('connection string: super-secret')),
+    };
+    const app = buildApp({}, failing);
+    await app.http.ready();
+
+    const response = await app.http.inject({
+      method: 'POST',
+      url: '/tools/ebay_get_listing',
+      headers: { authorization: ['Bearer', API_KEY].join(' ') },
+      payload: { item: '407111131587' },
+    });
+
+    expect(response.statusCode).toBe(500);
+    expect(JSON.stringify(response.json())).not.toContain('super-secret');
+    await app.http.close();
+    vi.unstubAllEnvs();
+  });
+});
+
+describe('ended listings', () => {
+  it('reports an ended listing as inactive rather than failing', async () => {
+    const provider = createFakeProvider({
+      listing: makeListing({
+        active: false,
+        ended: true,
+        secondsRemaining: -120,
+        itemEndDate: '2020-01-01T00:00:00.000Z',
+      }),
+    });
+    const app = buildApp({}, provider);
+    await app.http.ready();
+
+    const response = await app.http.inject({
+      method: 'POST',
+      url: '/tools/ebay_get_listing',
+      headers: { authorization: ['Bearer', API_KEY].join(' ') },
+      payload: { item: '407111131587' },
+    });
+
+    expect(response.statusCode).toBe(200);
+    expect(response.json().result.listing).toMatchObject({ active: false, ended: true });
+    await app.http.close();
+  });
+});
+
+describe('rate limiting', () => {
+  it('returns 429 once the window is exhausted', async () => {
+    const app = buildApp({ RATE_LIMIT_MAX: '2' });
+    await app.http.ready();
+    const headers = { authorization: ['Bearer', API_KEY].join(' ') };
+
+    expect((await app.http.inject({ method: 'GET', url: '/tools', headers })).statusCode).toBe(200);
+    expect((await app.http.inject({ method: 'GET', url: '/tools', headers })).statusCode).toBe(200);
+    const limited = await app.http.inject({ method: 'GET', url: '/tools', headers });
+    expect(limited.statusCode).toBe(429);
+    expect(limited.json().error.code).toBe('rate_limited');
+
+    await app.http.close();
+  });
+});
+
+describe('disabled auth mode', () => {
+  it('allows anonymous tool calls in development', async () => {
+    const app = createApplication({
+      config: testConfig({ AUTH_MODE: 'disabled' }),
+      logger: createTestLogger() as unknown as Logger,
+      provider: createFakeProvider(),
+    });
+    await app.http.ready();
+
+    const response = await app.http.inject({
+      method: 'POST',
+      url: '/tools/ebay_get_listing',
+      payload: { item: '407111131587' },
+    });
+    expect(response.statusCode).toBe(200);
+
+    await app.http.close();
+  });
+
+  it('omits the security requirement from the OpenAPI document', async () => {
+    const app = createApplication({
+      config: testConfig({ AUTH_MODE: 'disabled' }),
+      logger: createTestLogger() as unknown as Logger,
+      provider: createFakeProvider(),
+    });
+    await app.http.ready();
+
+    const document = (await app.http.inject({ method: 'GET', url: '/openapi.json' })).json();
+    expect(document.security).toEqual([]);
+
+    await app.http.close();
+  });
+});
