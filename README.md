@@ -374,11 +374,24 @@ eBay, not to Azure.
 ```bash
 # 1. Provision infrastructure, generate the connector API key, seed the eBay secrets
 EBAY_CLIENT_ID=... EBAY_CLIENT_SECRET=... \
-  ./scripts/bootstrap/provision.sh <subscription-id> prod westeurope
+  ./scripts/bootstrap/provision.sh <subscription-id> prod westus2
 
 # 2. Build the image in ACR and redeploy the Container App
-./scripts/bootstrap/deploy.sh <subscription-id> prod westeurope
+./scripts/bootstrap/deploy.sh <subscription-id> prod westus2
 ```
+
+`provision.sh` deploys in two passes on purpose. The Container App mounts all three secrets below
+directly out of Key Vault, so it cannot be created before they exist; the first pass runs with
+`deployApp=false` to create the vault and the identity, the script seeds the secrets, and the
+second pass brings the app up. Collapsing this back into a single deployment will fail on a clean
+subscription with `unable to fetch secret 'connector-api-key'`.
+
+The script also grants the invoking user **Key Vault Secrets Officer** on the vault and waits for
+the assignment to propagate. The vault sets `enableRbacAuthorization: true`, so being subscription
+Owner does **not** by itself grant the data-plane access needed to write a secret.
+
+> Note that CI validates the Bicep with `az bicep build` and the linter, which checks syntax and
+> never attempts a deployment. Green CI does not prove the templates deploy.
 
 Secrets in Key Vault, surfaced to the Container App as secret references:
 
@@ -389,6 +402,12 @@ Secrets in Key Vault, surfaced to the Container App as secret references:
 | `ebay-client-secret` | `EBAY_CLIENT_SECRET`  |
 
 To rotate a credential, set a new value in Key Vault and restart the Container App revision.
+
+Optional settings (`publicBaseUrl`, `ebayDeliveryCountry`, `ebayDeliveryPostalCode`) are omitted
+from the container's environment entirely when empty rather than passed as empty strings, and the
+config loader treats a blank value as "not set". Both halves matter: the first provisioning pass
+has no public URL to supply yet, and a strict `z.url()` against `''` would otherwise crash the
+container at startup with `PUBLIC_BASE_URL: Invalid URL` before it ever became healthy.
 
 ### GitHub OIDC
 
@@ -417,17 +436,20 @@ in this repository intentionally only builds and validates; it does not deploy.
 
 ## Troubleshooting
 
-| Symptom                                                | Likely cause and fix                                                                                                                                                             |
-| ------------------------------------------------------ | -------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
-| Startup fails with `ConfigurationError`                | The message names the offending variable. Common cases: `API_KEYS` shorter than 32 chars, only one of the eBay credentials set, `AUTH_MODE=disabled` with `NODE_ENV=production`. |
-| `401 unauthorized` on `/tools`                         | Missing or wrong `x-api-key` / bearer token. `/health` and `/openapi.json` are unauthenticated by design.                                                                        |
-| `502 upstream_error` mentioning invalid client         | eBay rejected the credentials. Check you are using the keyset that matches `EBAY_ENVIRONMENT`.                                                                                   |
-| `403` from eBay in production                          | Your production keyset is probably not enabled for the Buy/Browse APIs. Use `EBAY_ENVIRONMENT=sandbox` until it is approved.                                                     |
-| `404 not_found` for a listing that exists in a browser | Wrong marketplace. Pass `marketplaceId`, or use the full listing URL so the host implies it.                                                                                     |
-| `bad_request` about a product page                     | The URL is a `/p/<epid>` catalogue page. Open the actual listing and use its `/itm/` URL.                                                                                        |
-| `estimatedDeliveredTotal` missing                      | eBay did not report a shipping cost. Set `EBAY_DELIVERY_COUNTRY` / `EBAY_DELIVERY_POSTAL_CODE` to enable calculated shipping quotes.                                             |
-| `429 rate_limited`                                     | Either the connector's own per-principal limit or eBay's. The error envelope says which; `retryable` is `true`.                                                                  |
-| Empty `comparables`                                    | The source listing had no catalogue identifiers and its keywords were too specific. Check the returned `strategy` and `notes`.                                                   |
+| Symptom                                                                                                           | Likely cause and fix                                                                                                                                                                                                                        |
+| ----------------------------------------------------------------------------------------------------------------- | ------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| Startup fails with `ConfigurationError`                                                                           | The message names the offending variable. Common cases: `API_KEYS` shorter than 32 chars, only one of the eBay credentials set, `AUTH_MODE=disabled` with `NODE_ENV=production`.                                                            |
+| First `provision.sh` run fails with `Unable to get value using Managed identity ... for secret connector-api-key` | The Container App was deployed before its Key Vault secrets existed. Provisioning is deliberately two passes — do not collapse it into one, and do not deploy `main.bicep` by hand on a clean subscription without `deployApp=false` first. |
+| `az keyvault secret set` returns 403 for a subscription Owner                                                     | The vault uses RBAC authorisation, which is separate from control-plane roles. Grant yourself **Key Vault Secrets Officer** on the vault and allow ~45s to propagate; `provision.sh` does this automatically.                               |
+| Container App revision never becomes healthy                                                                      | Check the console logs for a `ConfigurationError` — the environment is validated at startup and the message names the offending variable.                                                                                                   |
+| `401 unauthorized` on `/tools`                                                                                    | Missing or wrong `x-api-key` / bearer token. `/health` and `/openapi.json` are unauthenticated by design.                                                                                                                                   |
+| `502 upstream_error` mentioning invalid client                                                                    | eBay rejected the credentials. Check you are using the keyset that matches `EBAY_ENVIRONMENT`.                                                                                                                                              |
+| `403` from eBay in production                                                                                     | Your production keyset is probably not enabled for the Buy/Browse APIs. Use `EBAY_ENVIRONMENT=sandbox` until it is approved.                                                                                                                |
+| `404 not_found` for a listing that exists in a browser                                                            | Wrong marketplace. Pass `marketplaceId`, or use the full listing URL so the host implies it.                                                                                                                                                |
+| `bad_request` about a product page                                                                                | The URL is a `/p/<epid>` catalogue page. Open the actual listing and use its `/itm/` URL.                                                                                                                                                   |
+| `estimatedDeliveredTotal` missing                                                                                 | eBay did not report a shipping cost. Set `EBAY_DELIVERY_COUNTRY` / `EBAY_DELIVERY_POSTAL_CODE` to enable calculated shipping quotes.                                                                                                        |
+| `429 rate_limited`                                                                                                | Either the connector's own per-principal limit or eBay's. The error envelope says which; `retryable` is `true`.                                                                                                                             |
+| Empty `comparables`                                                                                               | The source listing had no catalogue identifiers and its keywords were too specific. Check the returned `strategy` and `notes`.                                                                                                              |
 
 ---
 
