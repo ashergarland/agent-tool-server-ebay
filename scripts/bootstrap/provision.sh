@@ -63,6 +63,10 @@ if ! az role assignment list --assignee "${CALLER_ID}" --scope "${VAULT_ID}" \
 fi
 
 # Creates a secret only when it does not already exist, so re-running never rotates credentials.
+# Returns 0 when it wrote a new value and 1 when one was already there. A failed write aborts the
+# whole script: callers use this in an `if` condition, which suppresses `set -e` inside the
+# function, and silently continuing would fail the app pass with the far more cryptic
+# "Unable to get value using Managed identity ... for secret" that this ordering exists to avoid.
 ensure_secret() {
   local name="$1"
   local value="$2"
@@ -70,11 +74,16 @@ ensure_secret() {
     echo "    ${name}: existing value left untouched."
     return 1
   fi
-  az keyvault secret set \
+  if ! az keyvault secret set \
     --vault-name "${KEY_VAULT}" \
     --name "${name}" \
     --value "${value}" \
-    --output none
+    --output none; then
+    echo "    ${name}: FAILED to write." >&2
+    echo "    Check that you hold Key Vault Secrets Officer on ${KEY_VAULT}; the vault uses RBAC" >&2
+    echo "    authorisation, under which subscription Owner alone grants no data-plane access." >&2
+    exit 1
+  fi
   echo "    ${name}: created."
   return 0
 }
