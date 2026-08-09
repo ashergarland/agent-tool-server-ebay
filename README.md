@@ -24,7 +24,7 @@ architecture.
 
 - [How it works](#how-it-works)
 - [Available tools](#available-tools)
-- [Capability limits](#sold-and-completed-listings--what-this-connector-cannot-do)
+- [Capability limits](#sold-and-completed-listings-what-this-connector-cannot-do)
 - [eBay developer setup](#ebay-developer-setup)
 - [Quick start](#quick-start)
 - [HTTP API](#http-api)
