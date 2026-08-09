@@ -1,5 +1,8 @@
 # chatgpt-ebay
 
+[![CI](https://github.com/ashergarland/chatgpt-ebay/actions/workflows/ci.yml/badge.svg)](https://github.com/ashergarland/chatgpt-ebay/actions/workflows/ci.yml)
+[![License: MIT](https://img.shields.io/badge/License-MIT-blue.svg)](LICENSE)
+
 A backend-only **ChatGPT connector for eBay**. It exposes a small, typed tool surface that lets
 ChatGPT retrieve the _actual_ eBay listing behind a URL through the official **eBay Browse API**,
 search the live market, assemble comparables and diff several listings side by side — so the model
@@ -11,6 +14,24 @@ There is no frontend. The service is an HTTP/OpenAPI tool server (plus an MCP tr
 same tool registry). It is the sibling of
 [`chatgpt-azure`](https://github.com/ashergarland/chatgpt-azure) and deliberately mirrors its
 architecture.
+
+> [!IMPORTANT]
+> This project is under active development. Review the generated OpenAPI document before connecting
+> it to ChatGPT. The eBay Browse API returns active listings only; sold and completed prices are not
+> available.
+
+## Contents
+
+- [How it works](#how-it-works)
+- [Available tools](#available-tools)
+- [Capability limits](#sold-and-completed-listings--what-this-connector-cannot-do)
+- [eBay developer setup](#ebay-developer-setup)
+- [Quick start](#quick-start)
+- [HTTP API](#http-api)
+- [Configuration](#configuration)
+- [Testing](#testing)
+- [Deploying to Azure](#deploying-to-azure)
+- [Contributing and security](#contributing-and-security)
 
 ```
 ChatGPT
@@ -28,7 +49,7 @@ eBay Browse API
 
 ---
 
-## Design
+## How it works
 
 | Layer     | Location                | Responsibility                                                                                                        |
 | --------- | ----------------------- | --------------------------------------------------------------------------------------------------------------------- |
@@ -47,7 +68,7 @@ Two rules keep the design honest:
 
 ---
 
-## Tools
+## Available tools
 
 All four tools are read-only (`readOnlyHint` over MCP, `x-openai-isConsequential: false` in
 OpenAPI). Nothing in this connector changes state on eBay.
@@ -192,6 +213,40 @@ Best Match by omission) are exposed.
 
 ---
 
+## Quick start
+
+### Prerequisites
+
+- [Node.js](https://nodejs.org/) 22 or newer and npm
+- An eBay developer keyset for real Browse API calls
+- Docker, only if you want to build or run the container locally
+
+Install and start the development server:
+
+```bash
+git clone https://github.com/ashergarland/chatgpt-ebay.git
+cd chatgpt-ebay
+npm ci
+cp .env.example .env
+npm run dev
+```
+
+Replace `API_KEYS` in `.env` with a random value of at least 32 characters. Set
+`EBAY_CLIENT_ID`, `EBAY_CLIENT_SECRET`, and the matching `EBAY_ENVIRONMENT` before invoking eBay
+tools. The server and default test suite run without live eBay credentials.
+
+In another terminal, confirm that the server is ready:
+
+```bash
+curl http://localhost:8080/health
+curl -H "x-api-key: <your-api-key>" http://localhost:8080/tools
+```
+
+The local OpenAPI document is available at <http://localhost:8080/openapi.json>. For ChatGPT, deploy
+the service behind HTTPS and set `PUBLIC_BASE_URL`; see [Deploying to Azure](#deploying-to-azure).
+
+---
+
 ## HTTP API
 
 | Method | Path                | Auth | Description                                     |
@@ -281,19 +336,7 @@ Supported marketplaces are the 16 the Buy APIs actually support: `EBAY_AT`, `EBA
 
 ## Local development
 
-Requires Node.js 22+.
-
-```bash
-npm install
-cp .env.example .env          # then edit
-npm run dev
-```
-
-You can run the whole test suite and the server without eBay credentials (`AUTH_MODE=disabled`,
-no `EBAY_*` keys) — tool calls will then fail with a clear `internal_error` explaining that eBay
-credentials are not configured, but every non-eBay path works.
-
-Useful scripts:
+After following the [quick start](#quick-start), use these project scripts:
 
 ```bash
 npm run typecheck     # tsc --noEmit
@@ -380,50 +423,9 @@ EBAY_CLIENT_ID=... EBAY_CLIENT_SECRET=... \
 ./scripts/bootstrap/deploy.sh <subscription-id> prod westus2
 ```
 
-`provision.sh` deploys in two passes on purpose. The Container App mounts all three secrets below
-directly out of Key Vault, so it cannot be created before they exist; the first pass runs with
-`deployApp=false` to create the vault and the identity, the script seeds the secrets, and the
-second pass brings the app up. Collapsing this back into a single deployment will fail on a clean
-subscription with `unable to fetch secret 'connector-api-key'`.
-
-The script also grants the invoking user **Key Vault Secrets Officer** on the vault and waits for
-the assignment to propagate. The vault sets `enableRbacAuthorization: true`, so being subscription
-Owner does **not** by itself grant the data-plane access needed to write a secret.
-
-> Note that CI validates the Bicep with `az bicep build` and the linter, which checks syntax and
-> never attempts a deployment. Green CI does not prove the templates deploy.
-
-Secrets in Key Vault, surfaced to the Container App as secret references:
-
-| Key Vault secret     | Container App env var |
-| -------------------- | --------------------- |
-| `connector-api-key`  | `API_KEYS`            |
-| `ebay-client-id`     | `EBAY_CLIENT_ID`      |
-| `ebay-client-secret` | `EBAY_CLIENT_SECRET`  |
-
-To rotate a credential, set a new value in Key Vault and restart the Container App revision.
-
-Optional settings (`publicBaseUrl`, `ebayDeliveryCountry`, `ebayDeliveryPostalCode`) are omitted
-from the container's environment entirely when empty rather than passed as empty strings, and the
-config loader treats a blank value as "not set". Both halves matter: the first provisioning pass
-has no public URL to supply yet, and a strict `z.url()` against `''` would otherwise crash the
-container at startup with `PUBLIC_BASE_URL: Invalid URL` before it ever became healthy.
-
-### GitHub OIDC
-
-For CI-driven deployment, federate a GitHub Actions identity instead of storing a client secret:
-
-```bash
-az ad app create --display-name chatgpt-ebay-deploy
-# then add a federated credential for this repository, e.g.
-#   subject: repo:ashergarland/chatgpt-ebay:ref:refs/heads/main
-#   issuer:  https://token.actions.githubusercontent.com
-#   audience: api://AzureADTokenExchange
-```
-
-Grant that principal `Contributor` on the connector resource group only, and use
-`azure/login@v2` with `client-id` / `tenant-id` / `subscription-id` and no secret. The CI workflow
-in this repository intentionally only builds and validates; it does not deploy.
+For required permissions, the two-pass bootstrap, configuration, updates, credential rotation,
+monitoring, troubleshooting, and teardown, read the
+**[deployment and operations guide](docs/deployment.md)**.
 
 ### Registering the connector in ChatGPT
 
@@ -431,6 +433,10 @@ in this repository intentionally only builds and validates; it does not deploy.
    (`az keyvault secret show --vault-name <kv> --name connector-api-key --query value -o tsv`).
 2. Point ChatGPT at `https://<connector-host>/openapi.json`.
 3. Configure authentication as a bearer token using that key.
+
+> [!NOTE]
+> CI builds and lints the Bicep templates but does not deploy them. Validate changes in a
+> non-production subscription before production rollout.
 
 ---
 
@@ -494,3 +500,13 @@ infra/                   Bicep templates, modules and parameter files
 scripts/bootstrap/       provisioning and deployment scripts
 tests/                   unit and integration tests
 ```
+
+---
+
+## Contributing and security
+
+Contributions are welcome. Read [CONTRIBUTING.md](CONTRIBUTING.md) for the development workflow and
+quality checks. To report a vulnerability, follow [SECURITY.md](SECURITY.md) rather than opening a
+public issue.
+
+This project is available under the [MIT License](LICENSE).
