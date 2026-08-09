@@ -52,6 +52,18 @@ and the identity, the bootstrap script writes the secrets, and the second pass b
 ''')
 param deployApp bool = true
 
+@description('Deploy an availability test and alert that notify when the connector stops answering /health. Requires alertEmails or alertSmsPhone to be set, otherwise the alert would have nowhere to fire.')
+param enableHealthAlerts bool = false
+
+@description('Email addresses notified when the connector goes down. Supply at deployment time; do not commit personal addresses to a parameter file.')
+param alertEmails array = []
+
+@description('Phone number notified by SMS when the connector goes down, digits only.')
+param alertSmsPhone string = ''
+
+@description('Country code for the SMS number, e.g. 1 for the United States.')
+param alertSmsCountryCode string = '1'
+
 var suffix = uniqueString(subscription().id, resourceGroupName)
 var defaultTags = union(tags, {
   workload: 'chatgpt-ebay'
@@ -128,6 +140,24 @@ module containerApp 'modules/container-app.bicep' = if (deployApp) {
     ebayDeliveryCountry: ebayDeliveryCountry
     ebayDeliveryPostalCode: ebayDeliveryPostalCode
     logLevel: logLevel
+  }
+}
+
+// Availability monitoring is opt-in: it only makes sense once the app exists and an owner has
+// said where to send alerts. Deploying it with no receivers would create an alert that fires
+// into nothing, which is worse than no alert because it looks like coverage.
+module monitoring 'modules/monitoring.bicep' = if (deployApp && enableHealthAlerts) {
+  name: 'monitoring'
+  scope: connectorResourceGroup
+  params: {
+    name: 'chatgpt-ebay-${environmentName}'
+    location: location
+    tags: defaultTags
+    connectorUrl: 'https://${containerApp!.outputs.fqdn}'
+    logAnalyticsWorkspaceId: logAnalytics.outputs.id
+    alertEmails: alertEmails
+    alertSmsPhone: alertSmsPhone
+    alertSmsCountryCode: alertSmsCountryCode
   }
 }
 
