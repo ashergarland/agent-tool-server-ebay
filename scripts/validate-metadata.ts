@@ -57,7 +57,7 @@ const officialSchema =
         if (!response.ok) {
           throw new Error(`Unable to load official MCP schema: HTTP ${response.status}`);
         }
-        return response.json() as Promise<unknown>;
+        return response.json();
       })()
     : JSON.parse(await readFile(process.env['MCP_SCHEMA_PATH'], 'utf8'));
 

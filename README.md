@@ -27,9 +27,10 @@ All tools are read-only and non-consequential:
 
 Depending on what eBay returns, listing details can include current price or bid, shipping options,
 estimated delivered total, condition, seller feedback, item location, return terms, availability,
-provider-reported sold quantity, category, item specifics, product identifiers, and images.
-`availability.soldQuantity`, when present, is a field on the current listing. It is not completed
-listing history, a sales timeline, or a sales-frequency estimate.
+provider-reported estimated sold quantity, category, item specifics, product identifiers, and
+images. `availability.soldQuantity`, when present, normalizes eBay's `estimatedSoldQuantity` field
+for the current listing. It is not completed listing history, a sales timeline, or a sales-frequency
+calculation.
 
 Search and comparison prices are active asking prices or current auction bids. The server does not
 turn them into a valuation or buying recommendation.

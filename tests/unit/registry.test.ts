@@ -44,6 +44,12 @@ describe('ToolRegistry', () => {
     }
   });
 
+  it('describes sold quantity as an estimate on an active listing, not sales history', () => {
+    const schema = registry.get('ebay_get_listing').outputJsonSchema;
+    expect(JSON.stringify(schema)).toContain('Estimated sold quantity');
+    expect(JSON.stringify(schema)).toContain('not completed-listing history');
+  });
+
   it('gives every tool a description long enough to guide tool choice', () => {
     for (const tool of registry.list()) {
       expect(tool.summary.length).toBeGreaterThan(20);
@@ -72,7 +78,7 @@ describe('ToolRegistry', () => {
       kind: 'read',
       inputSchema: z.object({}),
       outputSchema: z.object({ value: z.string() }),
-      handler: async () => ({ value: 42 }),
+      handler: () => Promise.resolve({ value: 42 }),
     } as unknown as ToolDefinition;
     const { services } = buildServices();
 
