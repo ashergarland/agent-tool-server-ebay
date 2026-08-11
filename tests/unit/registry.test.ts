@@ -61,6 +61,25 @@ describe('ToolRegistry', () => {
       expect.objectContaining({ code: 'not_found' }) as unknown,
     );
   });
+
+  it('validates handler output before returning it to any transport', async () => {
+    const invalidOutput = {
+      name: 'ebay_invalid_output',
+      title: 'Invalid output fixture',
+      summary: 'Test-only tool with deliberately invalid handler output.',
+      description:
+        'This test-only definition proves that every transport receives output validated by the shared registry boundary.',
+      kind: 'read',
+      inputSchema: z.object({}),
+      outputSchema: z.object({ value: z.string() }),
+      handler: async () => ({ value: 42 }),
+    } as unknown as ToolDefinition;
+    const { services } = buildServices();
+
+    await expect(
+      createToolRegistry([invalidOutput]).invoke('ebay_invalid_output', {}, services, context),
+    ).rejects.toThrowError(expect.objectContaining({ code: 'internal_error' }) as unknown);
+  });
 });
 
 describe('tool input validation', () => {

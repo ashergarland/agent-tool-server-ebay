@@ -1,6 +1,6 @@
 # Security policy
 
-Security is a core design constraint of chatgpt-ebay. The connector receives credentials and sends
+Security is a core design constraint of agent-tool-server-ebay. The server receives credentials and sends
 requests to eBay on behalf of authenticated callers, so suspected vulnerabilities must be handled
 privately.
 
@@ -14,7 +14,7 @@ repository for updates.
 
 Use GitHub's private vulnerability reporting flow:
 
-<https://github.com/ashergarland/chatgpt-ebay/security/advisories/new>
+<https://github.com/ashergarland/agent-tool-server-ebay/security/advisories/new>
 
 Do not open a public issue, discussion, or pull request for an undisclosed vulnerability. Include:
 

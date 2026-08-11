@@ -26,6 +26,7 @@ if [[ -z "${REGISTRY_NAME}" ]]; then
   exit 1
 fi
 REGISTRY_SERVER="$(az acr show --name "${REGISTRY_NAME}" --query loginServer --output tsv)"
+# The legacy ACR repository is retained so existing revisions and rollback tags remain usable.
 IMAGE="${REGISTRY_SERVER}/chatgpt-ebay:${TAG}"
 VERSION="$(node -p "require('${REPO_ROOT}/package.json').version")"
 

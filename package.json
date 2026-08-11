@@ -1,7 +1,7 @@
 {
-  "name": "chatgpt-ebay",
+  "name": "agent-tool-server-ebay",
   "version": "0.1.0",
-  "description": "Backend connector that lets ChatGPT retrieve and compare real eBay listings through the official eBay Browse API.",
+  "description": "Read-only agent tool server for searching, retrieving, and comparing active eBay Marketplace listings.",
   "license": "MIT",
   "type": "module",
   "private": true,
@@ -22,11 +22,13 @@
     "format:check": "prettier --check .",
     "test": "vitest run",
     "test:watch": "vitest",
-    "test:coverage": "vitest run --coverage"
+    "test:coverage": "vitest run --coverage",
+    "metadata:validate": "tsx scripts/validate-metadata.ts",
+    "openapi:validate": "vitest run tests/unit/openapi.test.ts"
   },
   "repository": {
     "type": "git",
-    "url": "git+https://github.com/ashergarland/chatgpt-ebay.git"
+    "url": "git+https://github.com/ashergarland/agent-tool-server-ebay.git"
   },
   "dependencies": {
     "@modelcontextprotocol/sdk": "^1.30.0",
@@ -37,6 +39,8 @@
   "devDependencies": {
     "@types/node": "^22.20.1",
     "@vitest/coverage-v8": "^4.1.10",
+    "ajv": "^8.20.0",
+    "ajv-formats": "^3.0.1",
     "eslint": "^9.39.5",
     "eslint-config-prettier": "^10.1.8",
     "prettier": "^3.9.6",
@@ -44,5 +48,12 @@
     "typescript": "^5.9.3",
     "typescript-eslint": "^8.66.0",
     "vitest": "^4.1.10"
+  },
+  "homepage": "https://github.com/ashergarland/agent-tool-server-ebay#readme",
+  "bugs": {
+    "url": "https://github.com/ashergarland/agent-tool-server-ebay/issues"
+  },
+  "bin": {
+    "agent-tool-server-ebay-mcp": "dist/mcp/stdio.js"
   }
 }

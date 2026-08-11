@@ -1,512 +1,300 @@
-# chatgpt-ebay
+# agent-tool-server-ebay
 
-[![CI](https://github.com/ashergarland/chatgpt-ebay/actions/workflows/ci.yml/badge.svg)](https://github.com/ashergarland/chatgpt-ebay/actions/workflows/ci.yml)
+[![CI](https://github.com/ashergarland/agent-tool-server-ebay/actions/workflows/ci.yml/badge.svg)](https://github.com/ashergarland/agent-tool-server-ebay/actions/workflows/ci.yml)
+[![Security](https://github.com/ashergarland/agent-tool-server-ebay/actions/workflows/security.yml/badge.svg)](https://github.com/ashergarland/agent-tool-server-ebay/actions/workflows/security.yml)
 [![License: MIT](https://img.shields.io/badge/License-MIT-blue.svg)](LICENSE)
 
-A backend-only **ChatGPT connector for eBay**. It exposes a small, typed tool surface that lets
-ChatGPT retrieve the _actual_ eBay listing behind a URL through the official **eBay Browse API**,
-search the live market, assemble comparables and diff several listings side by side — so the model
-reasons about buy/bid decisions from real, structured evidence instead of scraped web pages.
+**eBay Marketplace** is a read-only agent tool server for retrieving, searching, and comparing
+current eBay listings through the official eBay Browse API. It exposes one typed tool registry
+through HTTP/OpenAPI, local stdio MCP, and stateless Streamable HTTP MCP.
 
-The connector supplies data. It never recommends whether to buy or bid.
-
-There is no frontend. The service is an HTTP/OpenAPI tool server (plus an MCP transport over the
-same tool registry). It is the sibling of
-[`chatgpt-azure`](https://github.com/ashergarland/chatgpt-azure) and deliberately mirrors its
-architecture.
+This independent project is not endorsed by, affiliated with, or sponsored by eBay.
 
 > [!IMPORTANT]
-> This project is under active development. Review the generated OpenAPI document before connecting
-> it to ChatGPT. The eBay Browse API returns active listings only; sold and completed prices are not
-> available.
+> The server works with active-listing data. It does not provide completed-item search, historical
+> sold prices, sales frequency, recent-sales history, or unrestricted marketplace analytics.
 
-## Contents
+## Capabilities
 
-- [How it works](#how-it-works)
-- [Available tools](#available-tools)
-- [Capability limits](#sold-and-completed-listings-what-this-connector-cannot-do)
-- [eBay developer setup](#ebay-developer-setup)
-- [Quick start](#quick-start)
-- [HTTP API](#http-api)
-- [Configuration](#configuration)
-- [Testing](#testing)
-- [Deploying to Azure](#deploying-to-azure)
-- [Contributing and security](#contributing-and-security)
+All tools are read-only and non-consequential:
 
-```
-ChatGPT
-   │  authenticated tool request
-   ▼
-chatgpt-ebay  ── transport (HTTP/OpenAPI today, MCP over the same registry)
-   │           ── tool registry (Zod-validated input/output)
-   │           ── service layer (listings / comparison + guardrails)
-   ▼
-eBay provider adapter
-   │  OAuth client credentials (cached application token)
-   ▼
-eBay Browse API
-```
+| Tool                         | Verified behavior                                                                          |
+| ---------------------------- | ------------------------------------------------------------------------------------------ |
+| `ebay_get_listing`           | Retrieves one listing by eBay URL, numeric item ID, or Browse API item ID.                 |
+| `ebay_search_listings`       | Searches active listings with bounded keyword, category, seller, price, and other filters. |
+| `ebay_find_similar_listings` | Finds active comparables using EPID, GTIN, MPN, category, and title keywords when present. |
+| `ebay_compare_listings`      | Compares two or more listings, including price, shipping, condition, seller, and returns.  |
 
----
+Depending on what eBay returns, listing details can include current price or bid, shipping options,
+estimated delivered total, condition, seller feedback, item location, return terms, availability,
+provider-reported sold quantity, category, item specifics, product identifiers, and images.
+`availability.soldQuantity`, when present, is a field on the current listing. It is not completed
+listing history, a sales timeline, or a sales-frequency estimate.
 
-## How it works
+Search and comparison prices are active asking prices or current auction bids. The server does not
+turn them into a valuation or buying recommendation.
 
-| Layer     | Location                | Responsibility                                                                                                        |
-| --------- | ----------------------- | --------------------------------------------------------------------------------------------------------------------- |
-| Transport | `src/server`, `src/mcp` | HTTP routing, auth, rate limiting, error mapping. No eBay knowledge.                                                  |
-| Tools     | `src/tools`             | Declarative tool definitions with Zod schemas; a registry that validates input and erases types for transports.       |
-| Services  | `src/services`          | Business logic and guardrails: listing retrieval, search, comparables, comparison.                                    |
-| Provider  | `src/provider`          | The `EbayProvider` port and its Browse API implementation. The only layer that knows about eBay wire formats.         |
-| Config    | `src/config`            | Zod-validated environment; the process fails fast on misconfiguration.                                                |
-| OpenAPI   | `src/openapi`           | Generates the OpenAPI 3.1 document from the tool registry, so the HTTP surface can never drift from the tool surface. |
+### Provider limitations and approval
 
-Two rules keep the design honest:
+- Browse search covers active inventory, not sold or completed inventory.
+- The limited-release eBay Marketplace Insights API can expose completed-item data, but this server
+  does not call it. Access requires separate eBay approval and is not assumed.
+- Production Buy API access may require eBay approval. Sandbox behavior is available with a sandbox
+  keyset and `EBAY_ENVIRONMENT=sandbox`.
+- Calculated shipping is often absent unless `EBAY_DELIVERY_COUNTRY` and
+  `EBAY_DELIVERY_POSTAL_CODE` supply buyer context.
+- The server uses documented eBay APIs only and does not scrape eBay pages.
 
-1. **Provider logic never lives in a transport.** Adding MCP required no changes to any service.
-2. **Everything below the transport throws `AppError`.** Both transports map that taxonomy to their
-   own error representation in exactly one place.
+## Architecture
 
----
-
-## Available tools
-
-All four tools are read-only (`readOnlyHint` over MCP, `x-openai-isConsequential: false` in
-OpenAPI). Nothing in this connector changes state on eBay.
-
-| Tool                         | Purpose                                                                                      |
-| ---------------------------- | -------------------------------------------------------------------------------------------- |
-| `ebay_get_listing`           | One listing by URL, numeric item id or Browse item id, fully normalised.                     |
-| `ebay_search_listings`       | Structured keyword/filter search over active listings.                                       |
-| `ebay_find_similar_listings` | Comparables for a given listing, using EPID/GTIN/MPN when eBay has them, keywords otherwise. |
-| `ebay_compare_listings`      | Two or more listings side by side plus a plain-language diff.                                |
-
-### `ebay_get_listing`
-
-Returns item id and legacy item id, title, subtitle, canonical URL, marketplace, price, current bid
-and bid count, Buy It Now and Best Offer availability, shipping options and lowest shipping cost,
-the estimated delivered total (only when shipping is actually known — see below), buying format,
-auction start/end and seconds remaining, whether the listing is still active, condition, condition
-id and the seller's condition description, seller username, feedback percentage and score, item and
-seller location, return policy, quantity and availability, category path, localized aspects (item
-specifics), catalogue identifiers (EPID/GTIN/MPN/brand), images, and any warnings eBay returned.
-
-`estimatedDeliveredTotal` is **omitted rather than guessed** when eBay does not report a shipping
-cost. A bare item price is never presented as a delivered total. Calculated-shipping listings only
-return `shippingOptions` when a buyer context is supplied, so setting `EBAY_DELIVERY_COUNTRY` and
-`EBAY_DELIVERY_POSTAL_CODE` materially improves delivered-total coverage.
-
-### Listing URL and item id handling
-
-`src/provider/ebay/urls.ts` accepts, and `tests/unit/urls.test.ts` exercises:
-
-- `https://www.ebay.com/itm/407111131587`
-- `https://www.ebay.com/itm/<seo-slug>/407111131587`
-- Query strings and tracking parameters (`?hash=item...&var=...&_trkparms=...`)
-- `m.ebay.com`, `www.ebay.co.uk`, `ebay.de`, `ebay.com.au` and the other supported country hosts,
-  each mapped to its Browse marketplace id (`EBAY_GB`, `EBAY_DE`, `EBAY_AU`, …)
-- Legacy `cgi.ebay.*/ws/eBayISAPI.dll?ViewItem&item=<id>` links
-- Bare numeric item ids (`407111131587`)
-- Browse API item ids (`v1|407111131587|0`, including a non-zero variation id)
-- `/p/<epid>` **product** pages, which are recognised and rejected with a clear `bad_request`
-  naming the EPID, because a product page is a catalogue entry rather than a listing
-
-Parsing uses `URL` plus targeted anchored regexes — never string splitting. Hostname → marketplace
-resolution walks labels inwards from the full host, so `ebay.com.au` wins over `ebay.com` and
-hostile lookalikes such as `notebay.com` or `ebay.com.evil.example` never match. Anything else
-raises a `bad_request` `AppError` explaining what forms are accepted.
-
----
-
-## Sold and completed listings — what this connector cannot do
-
-This is the single most important capability limit, and it is stated in the OpenAPI description
-too so the model sees it:
-
-> **The connector returns active listings only. It cannot retrieve sold or completed prices.**
-
-Why:
-
-- The **Browse API** — the API this connector is built on — indexes items that are currently
-  available for purchase. There is no sold/ended search in it.
-- eBay's **Marketplace Insights API**, which does expose sold/completed items (last 90 days), is a
-  **Limited Release** API. Access requires an application to, and approval from, the eBay Partner
-  Network / eBay business team. A standard developer account does not have it. Implementing it
-  speculatively would produce a tool that returns `403` for almost every user, so it is
-  deliberately not implemented.
-- The old Finding API `findCompletedItems` operation is retired and is not a compliant option.
-- Scraping eBay's "sold items" search results is against eBay's terms and is explicitly out of
-  scope for this connector.
-
-What you get instead: `ebay_search_listings` and `ebay_find_similar_listings` describe the **live
-asking market**. Every result is flagged `active`, and `activeOnly: true` is returned alongside so
-that ChatGPT cannot mistake asking prices for realised prices. In practice, for the categories this
-connector targets (retro consoles, games, electronics, physical media, collectibles), the active
-market plus auction bid counts and end times is a solid evidence base — it is just not the same as
-sold comps, and the connector says so.
-
-If you are later granted Marketplace Insights access, the clean place to add it is a new method on
-the `EbayProvider` port plus a new tool definition; no transport changes would be needed.
-
-**Production access note:** eBay documents production Buy API access (including Browse) as being
-for approved eBay partners. The sandbox is open to any developer account. If your production keyset
-is not enabled for Browse, set `EBAY_ENVIRONMENT=sandbox` — the connector is otherwise identical.
-
----
-
-## eBay developer setup
-
-1. Create an account at <https://developer.ebay.com> and open **Application Keysets**.
-2. Note the **App ID (Client ID)** and **Cert ID (Client Secret)** for the keyset you intend to
-   use. These map to `EBAY_CLIENT_ID` and `EBAY_CLIENT_SECRET`.
-3. Choose the environment: the sandbox keyset with `EBAY_ENVIRONMENT=sandbox`, or the production
-   keyset with `EBAY_ENVIRONMENT=production`.
-4. No user consent flow or redirect URI is needed — the connector only reads public listing data,
-   which uses the **client credentials** grant.
-
-### OAuth flow
-
-The connector uses the **application access token** (client credentials) grant, which is the
-correct flow for public Browse data:
-
-```
-POST https://api.ebay.com/identity/v1/oauth2/token      (sandbox: api.sandbox.ebay.com)
-Authorization: Basic base64(<client-id>:<client-secret>)
-Content-Type:  application/x-www-form-urlencoded
-
-grant_type=client_credentials&scope=https://api.ebay.com/oauth/api_scope
+```text
+HTTP/OpenAPI   stdio MCP   Streamable HTTP MCP
+           \      |      /
+             ToolRegistry
+                  |
+               Services
+                  |
+           EbayProvider port
+                  |
+        official eBay Browse API
 ```
 
-`src/provider/ebay/oauth.ts` implements this with:
+`src/tools/definitions.ts` is the single source of truth for tool names, summaries, safety kind,
+Zod input/output schemas, and handlers. Every transport uses the same `ToolRegistry`. Services own
+listing and comparison behavior; the provider adapter alone knows eBay endpoints and response
+shapes. Inputs and outputs are validated at the registry boundary.
 
-- **In-memory caching.** eBay tokens live 7200 seconds and eBay explicitly asks callers to reuse
-  them. A token is never fetched per request.
-- **Refresh before expiry.** The cached token is considered stale `EBAY_TOKEN_REFRESH_SKEW_MS`
-  (default 5 minutes) before its real expiry.
-- **In-flight collapsing.** Concurrent requests that arrive during a refresh share one token call.
-- **Invalidation on `401`.** A rejected token is dropped and the request is retried once with a
-  fresh one, which covers a token revoked early by eBay.
-- **No secret logging, ever.** Credentials, the `Authorization` header and the token itself are
-  never written to the log, including in error paths. There is a test asserting this.
+| Layer     | Location                | Responsibility                                            |
+| --------- | ----------------------- | --------------------------------------------------------- |
+| Transport | `src/server`, `src/mcp` | HTTP/MCP protocol, authentication, rate limits, errors.   |
+| Tools     | `src/tools`             | Typed definitions, Zod schemas, shared registry.          |
+| Services  | `src/services`          | Listing, search, comparable, comparison, and guardrails.  |
+| Provider  | `src/provider`          | eBay port, OAuth, REST calls, normalization, safe errors. |
+| Config    | `src/config`            | Validated and normalized environment configuration.       |
+| OpenAPI   | `src/openapi`           | OpenAPI 3.1 generated from the shared registry.           |
 
-Retries use exponential backoff with jitter for `429` and `5xx`, honouring `Retry-After` when eBay
-sends it, bounded by `EBAY_MAX_RETRIES`.
+## Transports and endpoints
 
-### Browse API usage
+| Method            | Path                | Authentication | Purpose                                 |
+| ----------------- | ------------------- | -------------- | --------------------------------------- |
+| `GET`             | `/health`           | Public         | Liveness and readiness probe            |
+| `GET`             | `/version`          | Public         | Build, provider, and transport metadata |
+| `GET`             | `/openapi.json`     | Public         | Generated OpenAPI 3.1 document          |
+| `GET`             | `/tools`            | Required       | Tool catalogue and JSON Schemas         |
+| `POST`            | `/tools/{toolName}` | Required       | Invoke one tool                         |
+| `GET/POST/DELETE` | `/mcp`              | Required       | Stateless Streamable HTTP MCP           |
 
-| Purpose            | Endpoint                                        |
-| ------------------ | ----------------------------------------------- |
-| Item by Browse id  | `GET /buy/browse/v1/item/{item_id}`             |
-| Item by numeric id | `GET /buy/browse/v1/item/get_item_by_legacy_id` |
-| Search             | `GET /buy/browse/v1/item_summary/search`        |
-
-Every call sends `X-EBAY-C-MARKETPLACE-ID`. When a buyer context is configured the connector also
-sends `X-EBAY-C-ENDUSERCTX` with `contextualLocation`, which is what makes eBay return
-`shippingOptions` for calculated-shipping listings. `fieldgroups=PRODUCT` is requested on item
-fetches so EPID/GTIN/MPN are available to drive comparables.
-
-Search filters are built in `src/provider/ebay/filters.ts` against eBay's documented filter syntax
-(`name:value`, sets `{A|B}`, ranges `[min..max]`). Notable eBay constraints the code respects:
-`price` requires `priceCurrency`; `maxDeliveryCost` only accepts `0`; `returnsAccepted` only
-accepts `true`; `conditions` only accepts `NEW`/`USED`, so granular condition filtering goes
-through `conditionIds`. Only the sort values eBay documents (`price`, `-price`, `newlyListed`, and
-Best Match by omission) are exposed.
-
----
-
-## Quick start
-
-### Prerequisites
-
-- [Node.js](https://nodejs.org/) 22 or newer and npm
-- An eBay developer keyset for real Browse API calls
-- Docker, only if you want to build or run the container locally
-
-Install and start the development server:
+The Streamable HTTP endpoint creates a fresh MCP server and transport per request and keeps no
+server-side MCP session store. Local stdio MCP runs through:
 
 ```bash
-git clone https://github.com/ashergarland/chatgpt-ebay.git
-cd chatgpt-ebay
+npm run build
+npm run mcp:stdio
+```
+
+The package also declares the executable name `agent-tool-server-ebay-mcp` for a future package
+distribution. The package is currently private and unpublished, so that command is not advertised
+as remotely installable.
+
+## Authentication and security
+
+Inbound caller authentication and outbound eBay credentials are separate:
+
+- `AUTH_MODE=api-key` is the default. `API_KEYS` contains comma-separated keys of at least 32
+  characters. Both `x-api-key` and `Authorization: Bearer` are accepted.
+- Keys are compared as fixed-width HMAC digests with constant-time comparison. Logs contain only a
+  non-reversible per-process fingerprint.
+- `AUTH_MODE=disabled` is development-only and is rejected in production.
+- eBay uses OAuth client credentials from `EBAY_CLIENT_ID` and `EBAY_CLIENT_SECRET`; tokens are
+  cached in memory, refreshed early, and never logged.
+
+Additional controls include a 1 MB request-body limit, bounded request IDs, per-principal and
+pre-auth rate limiting, provider timeouts and bounded retries, bounded result and comparison sizes,
+secret redaction, safe upstream error mapping, generic production 5xx responses, and a non-root
+container. The implementation calls only eBay `GET` endpoints; it cannot buy, bid, list, revise, or
+message.
+
+## Configuration
+
+Copy `.env.example` and provide placeholders or real values outside source control.
+
+| Variable                                              | Default              | Notes                                               |
+| ----------------------------------------------------- | -------------------- | --------------------------------------------------- |
+| `PORT` / `HOST`                                       | `8080` / `0.0.0.0`   | HTTP listener.                                      |
+| `SERVICE_NAME` / `SERVICE_VERSION`                    | project / `0.1.0`    | Public runtime identity.                            |
+| `LOG_LEVEL`                                           | `info`               | Structured pino logging level.                      |
+| `PUBLIC_BASE_URL`                                     | local URL            | OpenAPI server URL; use public HTTPS when deployed. |
+| `AUTH_MODE` / `API_KEYS`                              | `api-key` / required | Inbound caller authentication.                      |
+| `EBAY_CLIENT_ID` / `EBAY_CLIENT_SECRET`               | unset                | Required together, and required in production.      |
+| `EBAY_ENVIRONMENT`                                    | `production`         | `production` or `sandbox`.                          |
+| `EBAY_MARKETPLACE_ID`                                 | `EBAY_US`            | Default marketplace.                                |
+| `EBAY_OAUTH_SCOPES`                                   | public API scope     | Comma-separated client-credential scopes.           |
+| `EBAY_DELIVERY_COUNTRY` / `EBAY_DELIVERY_POSTAL_CODE` | unset                | Optional buyer context for calculated shipping.     |
+| `EBAY_AFFILIATE_CAMPAIGN_ID`                          | unset                | Optional eBay Partner Network campaign ID.          |
+| `EBAY_SEARCH_DEFAULT_LIMIT` / `EBAY_SEARCH_MAX_LIMIT` | `20` / `50`          | Search result guardrails.                           |
+| `EBAY_COMPARE_MAX_ITEMS`                              | `8`                  | Comparison guardrail; schema maximum is 20.         |
+| `REQUEST_TIMEOUT_MS`                                  | `30000`              | eBay request and OAuth timeout.                     |
+| `RATE_LIMIT_MAX` / `RATE_LIMIT_WINDOW_MS`             | `120` / `60000`      | In-process fixed-window limit; `0` disables.        |
+
+Blank optional environment variables are normalized to “unset.” This avoids startup failures when
+deployment platforms materialize an omitted optional value as an empty string.
+
+## Local development
+
+Requirements: Node.js 22+, npm, and an eBay developer keyset for real provider calls.
+
+```bash
+git clone https://github.com/ashergarland/agent-tool-server-ebay.git
+cd agent-tool-server-ebay
 npm ci
 cp .env.example .env
 npm run dev
 ```
 
-Replace `API_KEYS` in `.env` with a random value of at least 32 characters. Set
-`EBAY_CLIENT_ID`, `EBAY_CLIENT_SECRET`, and the matching `EBAY_ENVIRONMENT` before invoking eBay
-tools. The server and default test suite run without live eBay credentials.
-
-In another terminal, confirm that the server is ready:
+Use a random API key of at least 32 characters. The default test suite is hermetic and never needs
+live eBay credentials:
 
 ```bash
-curl http://localhost:8080/health
-curl -H "x-api-key: <your-api-key>" http://localhost:8080/tools
+npm run format:check
+npm run lint
+npm run typecheck
+npm run test:coverage
+npm run build
+npm run openapi:emit -- openapi.json
+npm run openapi:validate
+npm run metadata:validate
 ```
 
-The local OpenAPI document is available at <http://localhost:8080/openapi.json>. For ChatGPT, deploy
-the service behind HTTPS and set `PUBLIC_BASE_URL`; see [Deploying to Azure](#deploying-to-azure).
-
----
-
-## HTTP API
-
-| Method | Path                | Auth | Description                                     |
-| ------ | ------------------- | ---- | ----------------------------------------------- |
-| `GET`  | `/health`           | no   | Liveness probe.                                 |
-| `GET`  | `/version`          | no   | Build metadata and effective capabilities.      |
-| `GET`  | `/openapi.json`     | no   | OpenAPI 3.1 document for the ChatGPT connector. |
-| `GET`  | `/tools`            | yes  | Tool catalogue with JSON Schemas.               |
-| `POST` | `/tools/{toolName}` | yes  | Invoke a tool.                                  |
-
-Tool input may be sent either bare or wrapped in an `input` envelope:
-
-```bash
-curl -sS "https://<host>/tools/ebay_get_listing" \
-  -H "x-api-key: <connector-api-key>" \
-  -H 'content-type: application/json' \
-  -d '{"item":"https://www.ebay.com/itm/407111131587"}'
-```
-
-The `authorization` request header with a bearer token is accepted as an equivalent to
-`x-api-key`, which is what the ChatGPT connector UI sends.
-
-Successful responses are `{ "tool", "requestId", "result" }`. Failures use a single envelope:
-
-```json
-{
-  "error": {
-    "code": "bad_request",
-    "message": "\"https://www.ebay.com/p/1234567\" is an eBay product page, not a listing",
-    "details": { "epid": "1234567" },
-    "retryable": false,
-    "requestId": "9f1c..."
-  }
-}
-```
-
-Codes map to HTTP status: `bad_request` 400, `unauthorized` 401, `forbidden` 403, `not_found` 404,
-`conflict` 409, `rate_limited` 429, `internal_error` 500, `upstream_error` 502, `timeout` 504.
-
----
-
-## Authentication
-
-Inbound (ChatGPT → connector) authentication is **completely independent** of the eBay credentials.
-The eBay application credentials are never accepted as, or used as, a caller credential.
-
-- `AUTH_MODE=api-key` (default). Keys come from `API_KEYS`, comma separated, each at least 32
-  characters, compared in **constant time** against both `x-api-key` and `authorization: Bearer`.
-- `AUTH_MODE=disabled` is for local development only and is **rejected at startup** when
-  `NODE_ENV=production`.
-- Rate limiting is a fixed window per authenticated principal (`RATE_LIMIT_MAX` /
-  `RATE_LIMIT_WINDOW_MS`), with a more generous pre-auth limit per address so an unauthenticated
-  flood cannot force unbounded credential verification.
-
----
-
-## Configuration
-
-All configuration is environment based and validated at startup — see `.env.example` for the
-annotated list.
-
-| Variable                                              | Default                                | Notes                                                                          |
-| ----------------------------------------------------- | -------------------------------------- | ------------------------------------------------------------------------------ |
-| `PORT` / `HOST`                                       | `8080` / `0.0.0.0`                     | HTTP listener.                                                                 |
-| `LOG_LEVEL`                                           | `info`                                 | pino level.                                                                    |
-| `PUBLIC_BASE_URL`                                     | –                                      | Server URL advertised in the OpenAPI document.                                 |
-| `AUTH_MODE`                                           | `api-key`                              | `api-key` or `disabled` (rejected in production).                              |
-| `API_KEYS`                                            | –                                      | Comma-separated keys, each at least 32 characters. Compared in constant time.  |
-| `EBAY_CLIENT_ID` / `EBAY_CLIENT_SECRET`               | –                                      | eBay App ID / Cert ID. Required together; required when `NODE_ENV=production`. |
-| `EBAY_ENVIRONMENT`                                    | `production`                           | `production` or `sandbox`.                                                     |
-| `EBAY_MARKETPLACE_ID`                                 | `EBAY_US`                              | Default marketplace when a tool call does not imply one.                       |
-| `EBAY_OAUTH_SCOPES`                                   | `https://api.ebay.com/oauth/api_scope` | Comma-separated OAuth scopes.                                                  |
-| `EBAY_TOKEN_REFRESH_SKEW_MS`                          | `300000`                               | Renew the cached token this long before expiry.                                |
-| `EBAY_MAX_RETRIES` / `EBAY_RETRY_BASE_DELAY_MS`       | `2` / `250`                            | Backoff for `429`/`5xx`.                                                       |
-| `EBAY_DELIVERY_COUNTRY` / `EBAY_DELIVERY_POSTAL_CODE` | –                                      | Buyer context; greatly improves shipping and delivered-total coverage.         |
-| `EBAY_AFFILIATE_CAMPAIGN_ID`                          | –                                      | eBay Partner Network campaign id; returns affiliate item URLs when set.        |
-| `EBAY_SEARCH_DEFAULT_LIMIT` / `EBAY_SEARCH_MAX_LIMIT` | `20` / `50`                            | Result-size guardrails.                                                        |
-| `EBAY_COMPARE_MAX_ITEMS`                              | `8`                                    | Maximum listings per comparison.                                               |
-| `RATE_LIMIT_MAX` / `RATE_LIMIT_WINDOW_MS`             | `120` / `60000`                        | Per-principal fixed window; `0` disables.                                      |
-| `REQUEST_TIMEOUT_MS`                                  | `30000`                                | Upstream eBay timeout.                                                         |
-
-Supported marketplaces are the 16 the Buy APIs actually support: `EBAY_AT`, `EBAY_AU`, `EBAY_BE`,
-`EBAY_CA`, `EBAY_CH`, `EBAY_DE`, `EBAY_ES`, `EBAY_FR`, `EBAY_GB`, `EBAY_HK`, `EBAY_IE`, `EBAY_IT`,
-`EBAY_NL`, `EBAY_PL`, `EBAY_SG`, `EBAY_US`.
-
----
-
-## Local development
-
-After following the [quick start](#quick-start), use these project scripts:
-
-```bash
-npm run typecheck     # tsc --noEmit
-npm run lint          # eslint (type-aware)
-npm run format        # prettier
-npm test              # vitest
-npm run test:coverage # vitest + v8 coverage
-npm run build         # tsc -> dist/
-npm start             # run the built server
-npm run openapi:emit  # print the OpenAPI document (optionally to a file)
-npm run mcp:stdio     # run the same tools over MCP stdio
-```
-
-Docker:
-
-```bash
-docker build -t chatgpt-ebay .
-docker run --rm -p 8080:8080 \
-  -e API_KEYS="$(openssl rand -hex 32)" \
-  -e EBAY_CLIENT_ID="..." \
-  -e EBAY_CLIENT_SECRET="..." \
-  chatgpt-ebay
-```
-
----
-
-## Testing
-
-```bash
-npm test
-```
-
-The suite **never requires live eBay credentials**. The provider is exercised through a scripted
-`fetch` double (`tests/helpers/fake-fetch.ts`) and the services through a fake provider
-(`tests/helpers/fake-provider.ts`), so tests are hermetic and make no network calls.
-
-Coverage includes: eBay URL and item-id parsing (a large dedicated suite), marketplace resolution,
-config validation, auth middleware and constant-time key comparison, rate limiting, tool input
-validation, output-schema round-tripping for every tool, OAuth token caching / expiry / refresh /
-invalidation / concurrency, provider error mapping and retry behaviour, price and shipping
-normalisation, active vs ended listing behaviour, comparable-strategy selection, error
-normalisation, the health/version/openapi endpoints, the full HTTP tool surface, and the MCP
-transport.
-
-Live tests are opt-in and skipped by default:
+Live Browse tests are opt-in:
 
 ```bash
 EBAY_LIVE_TESTS=1 EBAY_CLIENT_ID=... EBAY_CLIENT_SECRET=... npm test
 ```
 
----
+## Container
 
-## MCP
-
-The same registry is served over MCP, so a local MCP client can use the identical tools:
+The multi-stage Node 22 image installs from the lockfile, removes development dependencies, runs as
+the unprivileged `node` user, and includes a `/health` check.
 
 ```bash
-npm run build && npm run mcp:stdio
+docker build -t agent-tool-server-ebay .
+docker run --rm -p 8080:8080 \
+  -e API_KEYS="$(openssl rand -hex 32)" \
+  -e EBAY_CLIENT_ID="..." \
+  -e EBAY_CLIENT_SECRET="..." \
+  agent-tool-server-ebay
 ```
 
-All tools are annotated `readOnlyHint: true` and `destructiveHint: false`. The MCP adapter contains
-no eBay logic whatsoever — it maps the registry to MCP's tool protocol and maps `AppError` to an
-MCP tool error, which is the only place that mapping exists for this transport.
+No public container image is currently claimed. Build locally or use the documented private Azure
+Container Registry deployment.
 
----
+## Azure provisioning and deployment
 
-## Deploying to Azure
-
-Infrastructure lives in `infra/` (Bicep, subscription-scoped) and provisions a user-assigned
-managed identity, an Azure Container Registry, a Key Vault holding the connector API key **and the
-eBay application credentials**, a Log Analytics workspace, and a Container App running the
-connector with the identity attached.
-
-The identity is deliberately minimal: `AcrPull` on its own registry and `Key Vault Secrets User` on
-its own vault. It gets **no** subscription Reader or Contributor role — the connector talks to
-eBay, not to Azure.
+The subscription-scoped Bicep creates a resource group, user-assigned identity, Azure Container
+Registry, Key Vault, Log Analytics workspace, Container Apps environment, Container App, and
+optional availability monitoring. The identity receives only `AcrPull` on its registry and Key
+Vault secret-read access on its vault.
 
 ```bash
-# 1. Provision infrastructure, generate the connector API key, seed the eBay secrets
 EBAY_CLIENT_ID=... EBAY_CLIENT_SECRET=... \
   ./scripts/bootstrap/provision.sh <subscription-id> prod westus2
-
-# 2. Build the image in ACR and redeploy the Container App
 ./scripts/bootstrap/deploy.sh <subscription-id> prod westus2
 ```
 
-For required permissions, the two-pass bootstrap, configuration, updates, credential rotation,
-monitoring, troubleshooting, and teardown, read the
-**[deployment and operations guide](docs/deployment.md)**.
+Provisioning is intentionally two-pass. Pass one creates the identity, registry, vault, logging,
+and role assignments. The script grants the current operator Key Vault secret-write access, waits
+for propagation, and writes required secrets; a failed write aborts. Pass two creates the app only
+after its managed identity can resolve the Key Vault references. `deploy.sh` then builds a
+commit-tagged image, reads the existing public hostname, redeploys with that image and
+`PUBLIC_BASE_URL`, and verifies health. Commit tags provide a rollback target.
 
-### Registering the connector in ChatGPT
+### Retained legacy Azure names
 
-1. Retrieve the connector API key from Key Vault
-   (`az keyvault secret show --vault-name <kv> --name connector-api-key --query value -o tsv`).
-2. Point ChatGPT at `https://<connector-host>/openapi.json`.
-3. Configure authentication as a bearer token using that key.
+Existing deployments predate the public repository rename. The following compatibility identifiers
+remain intentionally unchanged because renaming them would create parallel resources, orphan
+secrets or RBAC, break scripts, lose rollback history, or change the connector URL:
 
-> [!NOTE]
-> CI builds and lints the Bicep templates but does not deploy them. Validate changes in a
-> non-production subscription before production rollout.
+- `rg-chatgpt-ebay-<environment>` resource groups;
+- `ca-chatgpt-ebay-<environment>` Container Apps;
+- `cae-chatgpt-ebay-<environment>` Container Apps environments;
+- `id-chatgpt-ebay-<environment>` managed identities;
+- `log-chatgpt-ebay-<environment>` Log Analytics workspaces;
+- `acrchatgptebay...` registries and `kv-cgeb-...` Key Vaults;
+- the private ACR repository `chatgpt-ebay`;
+- `chatgpt-ebay-...` deployment-history and monitoring resource names.
 
----
+These are infrastructure compatibility names only. The running service reports
+`agent-tool-server-ebay`. New public examples, local images, package metadata, and CI artifacts use
+the renamed identity. A future destructive resource migration should be planned separately with
+secret, identity, DNS, monitoring, RBAC, and rollback cutovers; this change does not deploy or
+rename Azure resources.
+
+For permissions, updates, rollback, credential rotation, monitoring, and teardown, see
+[`docs/deployment.md`](docs/deployment.md).
+
+## Monitoring and cost behavior
+
+The Container App uses HTTPS-only ingress, liveness/readiness probes, 0.25 CPU, 0.5 GiB memory,
+HTTP scaling, and `minReplicas: 0`. Scale-to-zero minimizes personal-use cost but causes a cold start
+on the first request after idle time. Log Analytics retains 30 days and caps ingestion at 1 GB/day.
+Optional external `/health` checks and alerts are disabled unless recipients are supplied.
+
+The in-process rate limiter is per replica, not a distributed global quota. Put a gateway in front
+of the service if callers need a cross-replica limit.
+
+## Metadata, publication, and registration
+
+Root `server.json` uses the official MCP metadata schema and the canonical MCP name
+`io.github.ashergarland/agent-tool-server-ebay`. It intentionally omits `packages` and `remotes`:
+
+- the npm package is private and not published;
+- no public container image is claimed;
+- no stable hosted MCP endpoint is claimed;
+- the server is not claimed as published in the official MCP Registry or Docker MCP catalog.
+
+The family registry already contains
+`entries/agent-tool-server-ebay.json` in `ashergarland/agent-tool-server-registry`, currently marked
+as a source-metadata mismatch. After this repository PR merges, the exact follow-up is a separate
+registry PR that:
+
+1. updates that existing entry (not a new entry);
+2. adds `streamable-http` to `interfaces.transports`;
+3. changes provenance to `{ "kind": "server-json", "location": "server.json" }`;
+4. updates `lastVerifiedCommit` to this repository's merge commit;
+5. changes review status from `mismatch` to `reviewed` after verification and removes resolved notes;
+6. keeps all npm, container, hosted, official MCP Registry, and Docker catalog distribution claims
+   omitted; and
+7. runs `npm run catalog:generate`, `npm run verify`, and `npm run verify:online`, committing the
+   regenerated `catalog.json`.
+
+The application has no runtime dependency on the family registry.
+
+## Testing and CI
+
+Vitest covers configuration normalization, authentication, rate limiting, provider/OAuth behavior,
+normalization, service guardrails, all tool schemas, OpenAPI, HTTP, stdio-compatible MCP, and
+Streamable HTTP MCP. Fakes prevent default tests from calling eBay.
+
+CI enforces lockfile installation, formatting, lint, typecheck, coverage, production build,
+OpenAPI generation, official-schema `server.json` validation, container build and smoke tests,
+Bicep build/lint, shell syntax, dependency audit/review, secret scanning, and CodeQL. CI does not
+deploy.
 
 ## Troubleshooting
 
-| Symptom                                                                                                           | Likely cause and fix                                                                                                                                                                                                                        |
-| ----------------------------------------------------------------------------------------------------------------- | ------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
-| Startup fails with `ConfigurationError`                                                                           | The message names the offending variable. Common cases: `API_KEYS` shorter than 32 chars, only one of the eBay credentials set, `AUTH_MODE=disabled` with `NODE_ENV=production`.                                                            |
-| First `provision.sh` run fails with `Unable to get value using Managed identity ... for secret connector-api-key` | The Container App was deployed before its Key Vault secrets existed. Provisioning is deliberately two passes — do not collapse it into one, and do not deploy `main.bicep` by hand on a clean subscription without `deployApp=false` first. |
-| `az keyvault secret set` returns 403 for a subscription Owner                                                     | The vault uses RBAC authorisation, which is separate from control-plane roles. Grant yourself **Key Vault Secrets Officer** on the vault and allow ~45s to propagate; `provision.sh` does this automatically.                               |
-| Container App revision never becomes healthy                                                                      | Check the console logs for a `ConfigurationError` — the environment is validated at startup and the message names the offending variable.                                                                                                   |
-| `401 unauthorized` on `/tools`                                                                                    | Missing or wrong `x-api-key` / bearer token. `/health` and `/openapi.json` are unauthenticated by design.                                                                                                                                   |
-| `502 upstream_error` mentioning invalid client                                                                    | eBay rejected the credentials. Check you are using the keyset that matches `EBAY_ENVIRONMENT`.                                                                                                                                              |
-| `403` from eBay in production                                                                                     | Your production keyset is probably not enabled for the Buy/Browse APIs. Use `EBAY_ENVIRONMENT=sandbox` until it is approved.                                                                                                                |
-| `404 not_found` for a listing that exists in a browser                                                            | Wrong marketplace. Pass `marketplaceId`, or use the full listing URL so the host implies it.                                                                                                                                                |
-| `bad_request` about a product page                                                                                | The URL is a `/p/<epid>` catalogue page. Open the actual listing and use its `/itm/` URL.                                                                                                                                                   |
-| `estimatedDeliveredTotal` missing                                                                                 | eBay did not report a shipping cost. Set `EBAY_DELIVERY_COUNTRY` / `EBAY_DELIVERY_POSTAL_CODE` to enable calculated shipping quotes.                                                                                                        |
-| `429 rate_limited`                                                                                                | Either the connector's own per-principal limit or eBay's. The error envelope says which; `retryable` is `true`.                                                                                                                             |
-| Empty `comparables`                                                                                               | The source listing had no catalogue identifiers and its keywords were too specific. Check the returned `strategy` and `notes`.                                                                                                              |
-
----
-
-## Security considerations
-
-- **Credential separation.** The ChatGPT-facing API key and the eBay application credentials are
-  distinct, live in distinct Key Vault secrets, and are never interchangeable.
-- **No secret logging.** Tokens, client secrets and `Authorization` headers are never logged. Error
-  paths log the eBay `errorId`/category, not the request headers.
-- **Constant-time key comparison** avoids leaking key material through response timing.
-- **Fail-fast configuration.** A misconfigured deployment refuses to start rather than running with
-  authentication silently disabled.
-- **Sanitised errors in production.** Unexpected internal errors are reduced to a generic message
-  when `NODE_ENV=production`; the detail stays in the logs with the request id.
-- **Bounded input and output.** Body size, string lengths, array sizes, search limits, comparison
-  counts, image counts and item-specific counts are all capped, so neither a hostile caller nor an
-  unusually large eBay payload can blow up a model context.
-- **Read-only by construction.** The connector calls only `GET` Browse endpoints. There is no code
-  path that can buy, bid, list or message on eBay.
-- **Minimal cloud privilege.** The Azure identity can pull its image and read its own secrets, and
-  nothing else.
-
----
-
-## Repository layout
-
-```
-src/
-  app.ts                 composition root
-  index.ts               HTTP entry point
-  errors.ts              transport-agnostic error taxonomy
-  config/                Zod-validated environment
-  server/                Fastify transport, auth, rate limiting, error mapping
-  tools/                 tool definitions + registry
-  services/              listings, comparison, keyword derivation, guardrails
-  provider/              EbayProvider port + Browse API adapter
-    ebay/                oauth, rest, urls, filters, marketplaces, normalize
-  openapi/               OpenAPI 3.1 generation
-  mcp/                   MCP server + stdio entry point
-  util/                  logging, type helpers
-infra/                   Bicep templates, modules and parameter files
-scripts/bootstrap/       provisioning and deployment scripts
-tests/                   unit and integration tests
-```
-
----
+| Symptom                                | Likely cause and response                                                                                        |
+| -------------------------------------- | ---------------------------------------------------------------------------------------------------------------- |
+| Startup `ConfigurationError`           | Correct the named variable; common causes are short keys, partial eBay credentials, or disabled production auth. |
+| `/tools` or `/mcp` returns 401         | Supply the configured `x-api-key` or bearer token.                                                               |
+| eBay returns 401/403                   | Match the keyset to `EBAY_ENVIRONMENT`; production Browse access may require approval.                           |
+| Listing is 404 but exists in a browser | Pass its marketplace or use the full eBay country-site URL.                                                      |
+| Delivered total is missing             | eBay omitted shipping; configure buyer country and postal code.                                                  |
+| Search has no sold results             | Expected: Browse search contains active listings only.                                                           |
+| First Azure deployment cannot read KV  | Use `provision.sh`; do not skip its foundation, role propagation, and secret-write pass.                         |
+| OpenAPI advertises localhost           | Run `deploy.sh` so it discovers the existing FQDN and sets `PUBLIC_BASE_URL`.                                    |
+| First request is slow                  | A scale-to-zero cold start is expected; raise `minReplicas` only after accepting the cost.                       |
 
 ## Contributing and security
 
-Contributions are welcome. Read [CONTRIBUTING.md](CONTRIBUTING.md) for the development workflow and
-quality checks. To report a vulnerability, follow [SECURITY.md](SECURITY.md) rather than opening a
-public issue.
-
-This project is available under the [MIT License](LICENSE).
+See [CONTRIBUTING.md](CONTRIBUTING.md) for checks and [SECURITY.md](SECURITY.md) for private
+vulnerability reporting. This project is available under the [MIT License](LICENSE).

@@ -3,6 +3,7 @@ import { z } from 'zod';
 import type { AppConfig } from '../config/index.js';
 import { toAppError } from '../errors.js';
 import type { Services } from '../services/index.js';
+import type { ToolInvocationContext } from '../tools/definitions.js';
 import type { ToolRegistry } from '../tools/registry.js';
 
 const shapeOf = (schema: z.ZodType): z.ZodRawShape =>
@@ -16,6 +17,10 @@ export const createMcpServer = (
   config: AppConfig,
   registry: ToolRegistry,
   services: Services,
+  context: ToolInvocationContext = {
+    requestId: 'mcp-stdio',
+    principal: 'mcp-client',
+  },
 ): McpServer => {
   const server = new McpServer(
     { name: config.service.name, version: config.service.version },
@@ -29,6 +34,7 @@ export const createMcpServer = (
         title: tool.title,
         description: tool.description,
         inputSchema: shapeOf(tool.inputSchema),
+        outputSchema: shapeOf(tool.outputSchema),
         annotations: {
           readOnlyHint: tool.kind === 'read',
           destructiveHint: tool.kind === 'write',
@@ -38,10 +44,7 @@ export const createMcpServer = (
       },
       async (args: unknown) => {
         try {
-          const result = await tool.invoke(args, services, {
-            requestId: `mcp-${Date.now().toString(36)}`,
-            principal: 'mcp-client',
-          });
+          const result = await tool.invoke(args, services, context);
           return {
             content: [{ type: 'text' as const, text: JSON.stringify(result, null, 2) }],
             structuredContent: result as Record<string, unknown>,

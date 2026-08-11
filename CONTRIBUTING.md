@@ -1,6 +1,6 @@
 # Contributing
 
-Thank you for helping improve chatgpt-ebay.
+Thank you for helping improve agent-tool-server-ebay.
 
 ## Before you start
 
@@ -15,8 +15,8 @@ Thank you for helping improve chatgpt-ebay.
 You need Node.js 22 or newer:
 
 ```bash
-git clone https://github.com/ashergarland/chatgpt-ebay.git
-cd chatgpt-ebay
+git clone https://github.com/ashergarland/agent-tool-server-ebay.git
+cd agent-tool-server-ebay
 npm ci
 cp .env.example .env
 npm test
@@ -48,7 +48,9 @@ npm run lint
 npm run typecheck
 npm run test:coverage
 npm run build
-npm run openapi:emit -- /tmp/chatgpt-ebay-openapi.json
+npm run openapi:emit -- /tmp/agent-tool-server-ebay-openapi.json
+npm run openapi:validate
+npm run metadata:validate
 ```
 
 If formatting fails, run `npm run format`, review the result, and repeat the checks. Infrastructure

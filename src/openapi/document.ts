@@ -33,6 +33,7 @@ const versionSchema: JsonObject = {
     capabilities: {
       type: 'object',
       required: [
+        'transports',
         'authMode',
         'ebayEnvironment',
         'ebayConfigured',
@@ -41,6 +42,11 @@ const versionSchema: JsonObject = {
         'soldListingData',
       ],
       properties: {
+        transports: {
+          type: 'array',
+          items: { type: 'string' },
+          description: 'Implemented local and network transports.',
+        },
         authMode: { type: 'string' },
         ebayEnvironment: { type: 'string' },
         ebayConfigured: { type: 'boolean' },
@@ -215,10 +221,10 @@ export const buildOpenApiDocument = (config: AppConfig, registry: ToolRegistry):
   return {
     openapi: '3.1.0',
     info: {
-      title: 'ChatGPT eBay Connector',
+      title: 'eBay Marketplace',
       version: config.service.version,
       description:
-        'Backend connector that retrieves real eBay listings through the official eBay Browse ' +
+        'Read-only agent tool server that retrieves real eBay listings through the official eBay Browse ' +
         'API so that answers are grounded in the actual listing rather than a scraped web page. ' +
         'Given an eBay URL or item id it returns normalised price, shipping, auction, condition, ' +
         'seller, returns and item-specifics data, searches the live market, finds comparable ' +

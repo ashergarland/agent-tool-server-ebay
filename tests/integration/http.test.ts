@@ -33,7 +33,7 @@ describe('HTTP surface', () => {
   it('serves an unauthenticated health probe', async () => {
     const response = await app.http.inject({ method: 'GET', url: '/health' });
     expect(response.statusCode).toBe(200);
-    expect(response.json()).toMatchObject({ status: 'ok', service: 'chatgpt-ebay' });
+    expect(response.json()).toMatchObject({ status: 'ok', service: 'agent-tool-server-ebay' });
   });
 
   it('serves version and capability metadata without auth', async () => {
@@ -42,6 +42,7 @@ describe('HTTP surface', () => {
     expect(response.json()).toMatchObject({
       version: '1.2.3',
       capabilities: {
+        transports: ['stdio', 'streamable-http', 'openapi-http'],
         authMode: 'api-key',
         ebayEnvironment: 'production',
         ebayConfigured: true,
@@ -179,7 +180,7 @@ describe('HTTP surface', () => {
 
     const document = response.json();
     expect(document.openapi).toBe('3.1.0');
-    expect(document.info.title).toBe('ChatGPT eBay Connector');
+    expect(document.info.title).toBe('eBay Marketplace');
     expect(document.info.description).toMatch(/active listings only/);
     for (const tool of app.registry.list()) {
       expect(document.paths[`/tools/${tool.name}`]).toBeDefined();

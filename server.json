@@ -1,0 +1,12 @@
+{
+  "$schema": "https://static.modelcontextprotocol.io/schemas/2025-12-11/server.schema.json",
+  "name": "io.github.ashergarland/agent-tool-server-ebay",
+  "description": "Read-only MCP server for searching, retrieving, and comparing active eBay listings.",
+  "title": "eBay Marketplace",
+  "repository": {
+    "url": "https://github.com/ashergarland/agent-tool-server-ebay",
+    "source": "github"
+  },
+  "version": "0.1.0",
+  "websiteUrl": "https://github.com/ashergarland/agent-tool-server-ebay"
+}

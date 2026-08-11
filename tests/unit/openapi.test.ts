@@ -62,6 +62,14 @@ describe('OpenAPI document', () => {
       version: { type: 'string' },
     });
     expect(at(properties, 'capabilities', 'properties', 'authMode')).toEqual({ type: 'string' });
+    expect(at(properties, 'capabilities', 'properties', 'transports', 'items')).toEqual({
+      type: 'string',
+    });
+  });
+
+  it('uses the canonical product identity', () => {
+    expect(at(document, 'info', 'title')).toBe('eBay Marketplace');
+    expect(at(document, 'info', 'version')).toBe('1.2.3');
   });
 
   it('keeps advertising that sold listing data is unavailable', () => {

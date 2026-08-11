@@ -14,7 +14,7 @@ describe('config defaults', () => {
     expect(config).toMatchObject({
       env: 'development',
       isProduction: false,
-      service: { name: 'chatgpt-ebay' },
+      service: { name: 'agent-tool-server-ebay', version: '0.1.0' },
       http: { host: '0.0.0.0', port: 8080 },
       limits: { searchDefaultLimit: 20, searchMaxLimit: 50, compareMaxItems: 8 },
     });
@@ -223,7 +223,7 @@ describe('blank environment values', () => {
       NODE_ENV: 'production',
       PORT: '8080',
       LOG_LEVEL: 'info',
-      SERVICE_NAME: 'ca-chatgpt-ebay-prod',
+      SERVICE_NAME: 'agent-tool-server-ebay',
       AUTH_MODE: 'api-key',
       API_KEYS: 'k'.repeat(32),
       EBAY_CLIENT_ID: 'id',

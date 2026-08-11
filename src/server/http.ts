@@ -1,8 +1,11 @@
 import { randomUUID } from 'node:crypto';
-import Fastify, { type FastifyReply } from 'fastify';
+import { StreamableHTTPServerTransport } from '@modelcontextprotocol/sdk/server/streamableHttp.js';
+import type { Transport } from '@modelcontextprotocol/sdk/shared/transport.js';
+import Fastify, { type FastifyReply, type FastifyRequest } from 'fastify';
 import type { Logger } from 'pino';
 import type { AppConfig } from '../config/index.js';
 import { AppError } from '../errors.js';
+import { createMcpServer } from '../mcp/server.js';
 import { buildOpenApiDocument } from '../openapi/document.js';
 import type { Services } from '../services/index.js';
 import type { ToolRegistry } from '../tools/registry.js';
@@ -70,10 +73,10 @@ export const createHttpServer = (deps: HttpServerDeps): HttpServer => {
     done(null, payload);
   });
 
-  /** Authentication + rate limiting for everything under /tools. */
+  /** Authentication + rate limiting for every tool and MCP request. */
   // codeql[js/missing-rate-limiting]
   app.addHook('onRequest', async (request, reply) => {
-    if (!request.url.startsWith('/tools')) return;
+    if (!request.url.startsWith('/tools') && !request.url.startsWith('/mcp')) return;
 
     const preAuth = preAuthLimiter.consume(`ip:${request.ip}`);
     if (!preAuth.allowed) throw rateLimitExceeded(reply, preAuth);
@@ -101,6 +104,7 @@ export const createHttpServer = (deps: HttpServerDeps): HttpServer => {
     node: process.version,
     environment: config.env,
     capabilities: {
+      transports: ['stdio', 'streamable-http', 'openapi-http'],
       authMode: config.auth.mode,
       ebayEnvironment: config.ebay.environment,
       ebayConfigured: config.ebay.configured,
@@ -165,6 +169,54 @@ export const createHttpServer = (deps: HttpServerDeps): HttpServer => {
 
     return { tool: toolName, requestId: request.id, result };
   });
+
+  const handleMcp = async (
+    request: FastifyRequest<{ Body: unknown }>,
+    reply: FastifyReply,
+  ): Promise<void> => {
+    const transport = new StreamableHTTPServerTransport();
+    const server = createMcpServer(config, registry, services, {
+      requestId: request.id,
+      principal: request.principal?.id ?? 'anonymous',
+    });
+    let closed = false;
+    const close = async (): Promise<void> => {
+      if (closed) return;
+      closed = true;
+      await Promise.allSettled([transport.close(), server.close()]);
+    };
+
+    reply.raw.on('close', () => {
+      void close();
+    });
+
+    try {
+      await server.connect(transport as unknown as Transport);
+      reply.hijack();
+      await transport.handleRequest(request.raw, reply.raw, request.body);
+    } catch (error) {
+      await close();
+      if (!reply.sent) throw error;
+      request.log.error({ err: error, event: 'mcp.request.error' }, 'MCP request failed');
+      if (!reply.raw.headersSent) {
+        reply.raw.statusCode = 500;
+        reply.raw.setHeader('content-type', 'application/json');
+        reply.raw.end(
+          JSON.stringify({
+            jsonrpc: '2.0',
+            error: { code: -32603, message: 'Internal server error' },
+            id: null,
+          }),
+        );
+      } else {
+        reply.raw.destroy();
+      }
+    }
+  };
+
+  app.get('/mcp', handleMcp);
+  app.post('/mcp', handleMcp);
+  app.delete('/mcp', handleMcp);
 
   return app;
 };
