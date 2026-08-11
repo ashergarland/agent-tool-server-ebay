@@ -101,6 +101,24 @@ describe('MCP transport', () => {
     await app.http.close();
   });
 
+  it('rejects persistent MCP streams to remain stateless and scale-to-zero compatible', async () => {
+    const app = createApplication({
+      config: testConfig({ AUTH_MODE: 'api-key', API_KEYS: API_KEY }),
+      provider: createFakeProvider(),
+      logger: createTestLogger() as unknown as Logger,
+    });
+    for (const method of ['GET', 'DELETE'] as const) {
+      const response = await app.http.inject({
+        method,
+        url: '/mcp',
+        headers: { 'x-api-key': API_KEY },
+      });
+      expect(response.statusCode).toBe(405);
+      expect(response.headers['allow']).toBe('POST');
+    }
+    await app.http.close();
+  });
+
   it('annotates every tool as read-only and non-destructive', async () => {
     const { client, server } = await connect();
 

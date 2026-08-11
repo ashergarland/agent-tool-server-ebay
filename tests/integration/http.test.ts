@@ -67,6 +67,31 @@ describe('HTTP surface', () => {
     expect(response.json().error).toMatchObject({ code: 'unauthorized', retryable: false });
   });
 
+  it('cannot bypass protected-route authentication with percent-encoded paths', async () => {
+    const toolResponse = await app.http.inject({
+      method: 'POST',
+      url: '/%74ools/ebay_get_listing',
+      payload: { item: '407111131587' },
+    });
+    const mcpResponse = await app.http.inject({
+      method: 'POST',
+      url: '/%6dcp',
+      payload: {
+        jsonrpc: '2.0',
+        id: 1,
+        method: 'initialize',
+        params: {
+          protocolVersion: '2025-06-18',
+          capabilities: {},
+          clientInfo: { name: 'encoded-path-test', version: '1.0.0' },
+        },
+      },
+    });
+
+    expect(toolResponse.statusCode).toBe(401);
+    expect(mcpResponse.statusCode).toBe(401);
+  });
+
   it('rejects an incorrect api key', async () => {
     const response = await app.http.inject({
       method: 'GET',

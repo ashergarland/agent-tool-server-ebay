@@ -76,17 +76,18 @@ shapes. Inputs and outputs are validated at the registry boundary.
 
 ## Transports and endpoints
 
-| Method            | Path                | Authentication | Purpose                                 |
-| ----------------- | ------------------- | -------------- | --------------------------------------- |
-| `GET`             | `/health`           | Public         | Liveness and readiness probe            |
-| `GET`             | `/version`          | Public         | Build, provider, and transport metadata |
-| `GET`             | `/openapi.json`     | Public         | Generated OpenAPI 3.1 document          |
-| `GET`             | `/tools`            | Required       | Tool catalogue and JSON Schemas         |
-| `POST`            | `/tools/{toolName}` | Required       | Invoke one tool                         |
-| `GET/POST/DELETE` | `/mcp`              | Required       | Stateless Streamable HTTP MCP           |
+| Method | Path                | Authentication | Purpose                                 |
+| ------ | ------------------- | -------------- | --------------------------------------- |
+| `GET`  | `/health`           | Public         | Liveness and readiness probe            |
+| `GET`  | `/version`          | Public         | Build, provider, and transport metadata |
+| `GET`  | `/openapi.json`     | Public         | Generated OpenAPI 3.1 document          |
+| `GET`  | `/tools`            | Required       | Tool catalogue and JSON Schemas         |
+| `POST` | `/tools/{toolName}` | Required       | Invoke one tool                         |
+| `POST` | `/mcp`              | Required       | Stateless Streamable HTTP MCP           |
 
-The Streamable HTTP endpoint creates a fresh MCP server and transport per request and keeps no
-server-side MCP session store. Local stdio MCP runs through:
+The Streamable HTTP endpoint creates a fresh MCP server and transport per POST and keeps no
+server-side MCP session store. GET and DELETE return 405 instead of opening persistent streams,
+which preserves scale-to-zero behavior. Local stdio MCP runs through:
 
 ```bash
 npm run build
@@ -260,12 +261,16 @@ registry PR that:
 
 1. updates that existing entry (not a new entry);
 2. adds `streamable-http` to `interfaces.transports`;
-3. changes provenance to `{ "kind": "server-json", "location": "server.json" }`;
-4. updates `lastVerifiedCommit` to this repository's merge commit;
-5. changes review status from `mismatch` to `reviewed` after verification and removes resolved notes;
-6. keeps all npm, container, hosted, official MCP Registry, and Docker catalog distribution claims
+3. removes `oauth2` from inbound `interfaces.authentication` because OAuth is used only outbound to
+   eBay, retaining `api-key` and `bearer-token`;
+4. marks `EBAY_CLIENT_ID` as non-secret and defaulted `AUTH_MODE` / `EBAY_ENVIRONMENT` as not
+   required, while keeping connector keys and the eBay client secret classified as secrets;
+5. changes provenance to `{ "kind": "server-json", "location": "server.json" }`;
+6. updates `lastVerifiedCommit` to this repository's merge commit;
+7. changes review status from `mismatch` to `reviewed` after verification and removes resolved notes;
+8. keeps all npm, container, hosted, official MCP Registry, and Docker catalog distribution claims
    omitted; and
-7. runs `npm run catalog:generate`, `npm run verify`, and `npm run verify:online`, committing the
+9. runs `npm run catalog:generate`, `npm run verify`, and `npm run verify:online`, committing the
    regenerated `catalog.json`.
 
 The application has no runtime dependency on the family registry.

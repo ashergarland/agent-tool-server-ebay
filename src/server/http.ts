@@ -76,7 +76,8 @@ export const createHttpServer = (deps: HttpServerDeps): HttpServer => {
   /** Authentication + rate limiting for every tool and MCP request. */
   // codeql[js/missing-rate-limiting]
   app.addHook('onRequest', async (request, reply) => {
-    if (!request.url.startsWith('/tools') && !request.url.startsWith('/mcp')) return;
+    const route = request.routeOptions.url;
+    if (route !== '/tools' && route !== '/tools/:toolName' && route !== '/mcp') return;
 
     const preAuth = preAuthLimiter.consume(`ip:${request.ip}`);
     if (!preAuth.allowed) throw rateLimitExceeded(reply, preAuth);
@@ -214,9 +215,14 @@ export const createHttpServer = (deps: HttpServerDeps): HttpServer => {
     }
   };
 
-  app.get('/mcp', handleMcp);
   app.post('/mcp', handleMcp);
-  app.delete('/mcp', handleMcp);
+  const rejectMcpStream = (_request: FastifyRequest, reply: FastifyReply) =>
+    reply
+      .code(405)
+      .header('allow', 'POST')
+      .send({ jsonrpc: '2.0', error: { code: -32_000, message: 'Method not allowed' }, id: null });
+  app.get('/mcp', rejectMcpStream);
+  app.delete('/mcp', rejectMcpStream);
 
   return app;
 };
