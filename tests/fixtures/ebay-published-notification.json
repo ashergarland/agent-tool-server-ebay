@@ -1,0 +1,20 @@
+{
+  "_comment": [
+    "Verbatim excerpt of eBay's own published, open-source test data for the official",
+    "event-notification-nodejs-sdk. This is PUBLIC SAMPLE DATA, not a credential:",
+    "  - the account identifiers are eBay-fabricated sample values;",
+    "  - the key is a PUBLIC verification key, not a private signing key;",
+    "  - the signature is over that public sample payload and grants no access to anything.",
+    "It is committed so the verifier can be proven interoperable with a signature eBay actually",
+    "produced, rather than only with signatures our own tests generate.",
+    "Source:    https://raw.githubusercontent.com/eBay/event-notification-nodejs-sdk/main/test/test.json",
+    "Upstream blob SHA: 092dabc78180a410fdaf90f8afcc14d3cd73dd97",
+    "Verify provenance: gh api repos/eBay/event-notification-nodejs-sdk/contents/test/test.json --jq .sha"
+  ],
+  "signatureHeader": "eyJhbGciOiJlY2RzYSIsImtpZCI6Ijk5MzYyNjFhLTdkN2ItNDYyMS1hMGYxLTk2Y2NiNDI4YWY0OSIsInNpZ25hdHVyZSI6Ik1FWUNJUUNmeGZJV3V4bVdjSUJRSjljNS9YN2lHREpxczJSQ0dzQkVhQWppbnlycmZBSWhBSVY2d0djVGlCdVY1S0pVaWYyaG9reXJMK1E5c3NIa2FkK214Mm5FRTI1dyIsImRpZ2VzdCI6IlNIQTEifQ==",
+  "signedPayload": "{\"metadata\":{\"topic\":\"MARKETPLACE_ACCOUNT_DELETION\",\"schemaVersion\":\"1.0\",\"deprecated\":false},\"notification\":{\"notificationId\":\"49feeaeb-4982-42d9-a377-9645b8479411_33f7e043-fed8-442b-9d44-791923bd9a6d\",\"eventDate\":\"2021-03-19T20:43:59.462Z\",\"publishDate\":\"2021-03-19T20:43:59.679Z\",\"publishAttemptCount\":1,\"data\":{\"username\":\"test_user\",\"userId\":\"ma8vp1jySJC\",\"eiasToken\":\"nY+sHZ2PrBmdj6wVnY+sEZ2PrA2dj6wJnY+gAZGEpwmdj6x9nY+seQ==\"}}}",
+  "publicKey": "-----BEGIN PUBLIC KEY-----MFkwEwYHKoZIzj0CAQYIKoZIzj0DAQcDQgAEZhhxXKtR+TOvtDbgTPCkSof02qgBB7IsYOyf76ilExJ/upAa/vKIKheOoCyOpcLmi4t0b4uepb7LLjmMr90FUg==-----END PUBLIC KEY-----",
+  "algorithm": "ECDSA",
+  "digest": "SHA1",
+  "keyId": "9936261a-7d7b-4621-a0f1-96ccb428af49"
+}

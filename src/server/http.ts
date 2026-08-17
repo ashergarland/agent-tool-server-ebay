@@ -53,6 +53,15 @@ export const createHttpServer = (deps: HttpServerDeps): HttpServer => {
     },
     requestIdHeader: false,
     bodyLimit: MAX_BODY_BYTES,
+    /**
+     * Accepts the caller-supplied `X-Forwarded-For` chain, so `request.ip` is not trustworthy.
+     *
+     * Bounding this to a fixed hop count is an open item deliberately deferred until a deployed
+     * Container Apps environment can prove what the ingress actually appends: guessing too low
+     * collapses every caller into one rate-limit bucket, and guessing too high changes nothing.
+     * Nothing security-critical depends on `request.ip` — see the account-deletion hook below and
+     * "Open item: bound the trusted proxy configuration" in docs/deployment.md.
+     */
     trustProxy: true,
     ajv: { customOptions: { removeAdditional: false, coerceTypes: false } },
   });

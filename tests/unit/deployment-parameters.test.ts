@@ -229,4 +229,37 @@ describe('eBay account deletion wiring', () => {
       "grep -qiE 'secretnotfound|was not found in this key vault|resourcenotfound'",
     );
   });
+
+  it('never falls back to a placeholder eBay credential inline', () => {
+    // The old form was `ensure_secret ... "${EBAY_CLIENT_ID:-REPLACE_WITH_EBAY_APP_ID}"`, which
+    // wrote a placeholder whenever the variable was unset. Because an existing secret is never
+    // overwritten, that placeholder then survived every later provisioning run.
+    expect(provisionScript).not.toMatch(/\$\{EBAY_CLIENT_ID:-/);
+    expect(provisionScript).not.toMatch(/\$\{EBAY_CLIENT_SECRET:-/);
+  });
+
+  it('validates eBay credentials before writing any secret', () => {
+    const preflight = provisionScript.indexOf('assert_ebay_credentials_available');
+    const firstWrite = provisionScript.indexOf('ensure_secret "${KEY_VAULT}"');
+
+    expect(preflight).toBeGreaterThan(-1);
+    // Aborting halfway through would leave one credential written and the other missing.
+    expect(preflight).toBeLessThan(firstWrite);
+  });
+
+  it('refuses placeholder eBay credentials on a production target', () => {
+    expect(commonScript).toContain('refusing to provision a production target without real eBay');
+    // The opt-in escape hatch must be reachable only for non-production targets.
+    const productionBranch = commonScript.indexOf('if [[ "${production}" == \'true\' ]]');
+    const optIn = commonScript.indexOf('ALLOW_PLACEHOLDER_EBAY_CREDENTIALS');
+    expect(productionBranch).toBeGreaterThan(-1);
+    expect(productionBranch).toBeLessThan(optIn);
+  });
+
+  it('classifies a production eBay keyset as production regardless of the environment name', () => {
+    expect(commonScript).toContain('targets_ebay_production');
+    expect(commonScript).toContain('ebayEnvironment');
+    // Anything unparseable must fail safe towards production.
+    expect(commonScript).toContain('process.stdout.write("production")');
+  });
 });

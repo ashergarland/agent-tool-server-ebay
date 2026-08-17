@@ -61,6 +61,24 @@ const SUPPORTED_DIGESTS: Readonly<Record<string, string>> = {
 
 const SUPPORTED_ALGORITHMS = new Set(['ECDSA']);
 
+/**
+ * Case-insensitive comparison of a signature-header field against the corresponding field of the
+ * key metadata eBay returned.
+ *
+ * Case really does differ in practice: eBay's own published fixture carries `"alg":"ecdsa"` in the
+ * header while `getPublicKey` reports `"algorithm":"ECDSA"`, so a case-sensitive check would
+ * reject a signature eBay genuinely produced.
+ *
+ * Absent metadata is tolerated. eBay documents `algorithm` and `digest` with occurrence "Always",
+ * so absence would be a contract violation rather than a normal case; failing closed on it would
+ * add brittleness without adding protection, because the cryptographic verification against the
+ * fetched key remains the actual gate.
+ */
+const metadataAgrees = (headerValue: string, metadataValue: string | undefined): boolean =>
+  metadataValue === undefined ||
+  metadataValue.length === 0 ||
+  metadataValue.toUpperCase() === headerValue.toUpperCase();
+
 const PEM_HEADER = '-----BEGIN PUBLIC KEY-----';
 const PEM_FOOTER = '-----END PUBLIC KEY-----';
 
@@ -142,7 +160,21 @@ export class EbaySignatureVerifier implements SignatureVerifier {
       throw signatureRejected('unsupported digest algorithm');
     }
 
-    const pem = toPem((await this.options.publicKeys.getPublicKey(header.kid)).key);
+    const publicKey = await this.options.publicKeys.getPublicKey(header.kid);
+
+    /**
+     * The signature header is attacker-supplied; the key metadata comes from eBay over an
+     * authenticated call. Where they disagree, the header is lying about how the signature was
+     * produced, so the notification is rejected before any cryptography is attempted.
+     */
+    if (!metadataAgrees(header.alg, publicKey.algorithm)) {
+      throw signatureRejected('the signing algorithm does not match the signing key');
+    }
+    if (!metadataAgrees(header.digest, publicKey.digest)) {
+      throw signatureRejected('the digest algorithm does not match the signing key');
+    }
+
+    const pem = toPem(publicKey.key);
 
     /**
      * eBay signs the notification payload it transmitted. The received bytes are therefore the
