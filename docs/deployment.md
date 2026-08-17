@@ -15,7 +15,8 @@ The subscription-scoped Bicep template creates:
 - a resource group;
 - a user-assigned managed identity;
 - an Azure Container Registry;
-- a Key Vault containing the connector API key and eBay application credentials;
+- a Key Vault containing the connector API key, the eBay application credentials, and the eBay
+  marketplace account deletion verification token;
 - a Log Analytics workspace and Container Apps environment;
 - a Container App with external HTTPS ingress; and
 - optional availability monitoring and alerts.
@@ -46,31 +47,290 @@ Obtain an eBay App ID and Cert ID from
 [Application Keysets](https://developer.ebay.com/my/keys). Use sandbox credentials with
 `EBAY_ENVIRONMENT=sandbox`; production Browse API access requires eBay approval.
 
+A production keyset also requires Marketplace Account Deletion/Closure compliance — either a
+registered notification endpoint or an eBay-granted exemption — before it is enabled. This
+repository implements the endpoint; see
+[Post-merge production activation runbook](#post-merge-production-activation-runbook).
+
 ## First deployment
 
 From the repository root:
 
 ```bash
-EBAY_CLIENT_ID=... EBAY_CLIENT_SECRET=... \
-  ./scripts/bootstrap/provision.sh <subscription-id> [environment] [location]
-./scripts/bootstrap/deploy.sh <subscription-id> [environment] [location]
+export EBAY_CLIENT_ID='...'
+export EBAY_CLIENT_SECRET='...'
+
+./scripts/bootstrap/provision.sh <subscription-id> prod westus2 infra/parameters/prod.parameters.json
+./scripts/bootstrap/deploy.sh    <subscription-id> prod westus2 infra/parameters/prod.parameters.json
 ```
 
-The optional environment and location default to `prod` and `westus2`. Environment names must be
-2–10 characters and should contain only characters accepted by the generated Azure resource names.
+The optional environment, location, and parameter file default to `prod`, `westus2`, and
+`infra/parameters/<environment>.parameters.json`. Environment names must be 2–10 characters and
+should contain only characters accepted by the generated Azure resource names.
 
-Provisioning intentionally happens in two passes. The first pass creates the identity, registry,
+Provisioning intentionally happens in multiple passes. The first pass creates the identity, registry,
 vault, logs, and role assignments. The script grants the current user `Key Vault Secrets Officer`,
-waits for propagation, and stores a generated connector API key plus the supplied eBay credentials.
-The second pass creates the Container App, which reads those values directly from Key Vault.
+waits for propagation, and stores a generated connector API key, a generated eBay account-deletion
+verification token, and the supplied eBay credentials. The second pass creates the Container App,
+which reads those values directly from Key Vault. A third pass applies `PUBLIC_BASE_URL` and the
+account-deletion callback URL, neither of which can be known until ingress exists.
 
 If eBay credentials are omitted, the script writes conspicuous placeholders and prints commands for
 replacing them. Replace both before expecting eBay tool calls to succeed.
 
 The initial app uses a placeholder image. `deploy.sh` builds the current commit in ACR, updates the
-Container App, sets its public URL, and verifies `/health`. Do not register the connector before
+Container App, sets its public URLs, and verifies `/health`. Do not register the connector before
 this step: until the real hostname is supplied, the generated OpenAPI document advertises
 localhost.
+
+## Deployment parameters
+
+`infra/parameters/<environment>.parameters.json` is the canonical, declarative source of environment
+configuration, and both scripts pass it to **every** `az deployment sub create`. This is what stops a
+routine release from silently reapplying a Bicep default for a setting an operator previously
+configured.
+
+Precedence, lowest to highest:
+
+1. defaults declared in `infra/main.bicep`;
+2. `infra/parameters/<environment>.parameters.json` — committed, canonical, required. A missing file
+   aborts the deployment rather than falling back to defaults;
+3. `infra/parameters/<environment>.local.parameters.json` — optional, gitignored operator overlay,
+   applied after the committed file. Use it for account-specific values such as alert recipients;
+4. release-specific values passed on the command line by the scripts: `image`, `publicBaseUrl`,
+   `accountDeletionEndpointUrl`, and `deployApp`.
+
+The committed files pin `environmentName`, `location`, `ebayEnvironment`, `ebayMarketplaceId`,
+`ebayDeliveryCountry`, `ebayDeliveryPostalCode`, `logLevel`, `minReplicas`, `maxReplicas`,
+`enableHealthAlerts`, `alertEmails`, `alertSmsPhone`, `alertSmsCountryCode`, and `tags`.
+
+Never commit alert addresses, phone numbers, subscription ids, tenant ids, or secrets. Secrets are
+not parameters at all: the connector API key, the eBay client id and secret, and the eBay
+account-deletion verification token live only in Key Vault and reach the Container App as managed
+secret references.
+
+`tests/unit/deployment-parameters.test.ts` and `scripts/verify-parameter-resolution.sh` run in CI
+and fail if a new operator-facing parameter is added without being pinned in the environment files,
+if either script stops passing the parameter file, or if an account-specific value is committed.
+
+To preview a configuration change before applying it:
+
+```bash
+az deployment sub what-if \
+  --location westus2 \
+  --template-file infra/main.bicep \
+  --parameters @infra/parameters/prod.parameters.json
+```
+
+## Post-merge production activation runbook
+
+Follow these steps in order. Steps 1–4 stand the service up; step 5 makes the eBay application
+compliant; steps 6–8 confirm real eBay data; steps 9–10 expose the capability to clients.
+
+### Step 1 — Prepare credentials locally
+
+Obtain the **production** App ID (client id) and Cert ID (client secret) from
+[Application Keysets](https://developer.ebay.com/my/keys). No user OAuth is required: the Browse
+capability uses the application client-credentials grant, so no eBay user consent step exists.
+
+Put them in the environment rather than on a command line, so they do not enter shell history:
+
+```bash
+read -rs EBAY_CLIENT_ID && export EBAY_CLIENT_ID
+read -rs EBAY_CLIENT_SECRET && export EBAY_CLIENT_SECRET
+```
+
+### Step 2 — Provision Azure
+
+```bash
+./scripts/bootstrap/provision.sh <subscription-id> prod westus2 infra/parameters/prod.parameters.json
+```
+
+This creates or reuses the resource group, managed identity, container registry, Key Vault, Log
+Analytics workspace, Container Apps environment, and Container App, and seeds the connector API key,
+the eBay credentials, and the account-deletion verification token. Existing secrets are never
+rotated, and an existing image is never rolled back to the placeholder.
+
+### Step 3 — Deploy the real image
+
+```bash
+./scripts/bootstrap/deploy.sh <subscription-id> prod westus2 infra/parameters/prod.parameters.json
+```
+
+The script reports the connector URL, `/health`, `/version`, `/openapi.json`, `/mcp`, the Marketplace
+Account Deletion callback URL, the Key Vault name, and the safe retrieval commands for the connector
+API key and the verification token. Neither secret is printed.
+
+### Step 4 — Verify the hosted service before eBay registration
+
+```bash
+FQDN='<the host from the deploy summary>'
+
+test "$(curl -s -o /dev/null -w '%{http_code}' "https://$FQDN/health")"       = "200"
+test "$(curl -s -o /dev/null -w '%{http_code}' "https://$FQDN/version")"      = "200"
+test "$(curl -s -o /dev/null -w '%{http_code}' "https://$FQDN/openapi.json")" = "200"
+test "$(curl -s -o /dev/null -w '%{http_code}' "https://$FQDN/tools")"        = "401"
+
+API_KEY="$(az keyvault secret show --vault-name "$KEY_VAULT" --name connector-api-key --query value -o tsv)"
+test "$(curl -s -o /dev/null -w '%{http_code}' -H "x-api-key: $API_KEY" "https://$FQDN/tools")" = "200"
+unset API_KEY
+```
+
+Confirm `/version` reports `capabilities.accountDeletionEndpointConfigured: true` and that the
+OpenAPI `servers` URL uses the public HTTPS hostname. Do **not** expect a successful production
+Browse call yet: the production keyset may still be disabled pending compliance.
+
+### Step 5 — Complete eBay Marketplace Account Deletion compliance
+
+In the eBay developer portal:
+
+**Application Keys → Production keyset → Alerts & Notifications → Marketplace Account Deletion.**
+
+Provide:
+
+- the alert **email address**, entered manually in the portal — it is deliberately not stored in this
+  repository or in Azure;
+- the **callback URL** exactly as printed by `deploy.sh`:
+  `https://<fqdn>/ebay/notifications/marketplace-account-deletion`;
+- the **verification token** from Key Vault:
+
+  ```bash
+  az keyvault secret show \
+    --vault-name "$KEY_VAULT" \
+    --name ebay-account-deletion-token \
+    --query value -o tsv
+  ```
+
+Save. eBay immediately issues `GET <callback>?challenge_code=<value>`. The endpoint replies
+`200 application/json` with `{"challengeResponse":"<sha256 hex>"}` and the endpoint is registered.
+
+If registration fails, the near-certain cause is a mismatch between the URL entered in the portal and
+`EBAY_ACCOUNT_DELETION_ENDPOINT_URL` in the Container App. eBay hashes that string verbatim; compare
+them character for character, including any trailing slash:
+
+```bash
+az containerapp show --name "$APP_NAME" --resource-group "$RESOURCE_GROUP" \
+  --query "properties.template.containers[0].env[?name=='EBAY_ACCOUNT_DELETION_ENDPOINT_URL'].value" -o tsv
+```
+
+You can reproduce the expected hash locally without deploying anything:
+
+```bash
+printf '%s' "${CHALLENGE_CODE}${VERIFICATION_TOKEN}${ENDPOINT_URL}" | openssl dgst -sha256 -hex
+```
+
+Then use eBay's **Send Test Notification** control and confirm the `POST` path: the notification is
+received, its `x-ebay-signature` verifies, and the endpoint acknowledges with `204`.
+
+Healthy logs for the two operations look like this — note that no eBay account identifier appears in
+either, and neither the verification token nor the payload is present:
+
+```json
+{
+  "level": "info",
+  "event": "ebay.account_deletion.challenge",
+  "outcome": "answered",
+  "msg": "answered eBay endpoint validation challenge"
+}
+```
+
+```json
+{
+  "level": "info",
+  "event": "ebay.account_deletion.processed",
+  "topic": "MARKETPLACE_ACCOUNT_DELETION",
+  "notificationId": "<eBay delivery id>",
+  "publishAttemptCount": 1,
+  "durationMs": 142,
+  "outcome": "acknowledged",
+  "msg": "eBay marketplace account deletion notification acknowledged"
+}
+```
+
+A `412` in the response instead means the signature did not verify: check that the deployment can
+reach `api.ebay.com` and that the Key Vault eBay credentials are real rather than the provisioning
+placeholders, since the public key is fetched with an application access token.
+
+The domain deletion action is a deliberate no-op. This service persists no eBay listing data, no eBay
+user profile, and no notification payload, so there is nothing to erase. If that ever changes, the
+deletion processor must be updated before the new feature is production-ready.
+
+### Step 6 — Confirm production keyset activation
+
+Once eBay shows the application as compliant, verify that the production credentials mint an
+application token:
+
+```bash
+curl -fsS -X POST https://api.ebay.com/identity/v1/oauth2/token \
+  -H "Content-Type: application/x-www-form-urlencoded" \
+  -u "$EBAY_CLIENT_ID:$EBAY_CLIENT_SECRET" \
+  -d 'grant_type=client_credentials&scope=https://api.ebay.com/oauth/api_scope' \
+  | jq 'has("access_token")'
+```
+
+### Step 7 — Run a real eBay Browse smoke test
+
+With `EBAY_CLIENT_ID` and `EBAY_CLIENT_SECRET` already exported:
+
+```bash
+EBAY_LIVE_TESTS=1 EBAY_ENVIRONMENT=production npm test
+```
+
+Use `EBAY_ENVIRONMENT=sandbox` with the sandbox keyset for a pre-production rehearsal. The live suite
+is skipped unless `EBAY_LIVE_TESTS=1` and both credentials are present, so it never runs in CI. It
+verifies OAuth token acquisition, a Browse search, a follow-up listing lookup, and normalization.
+
+### Step 8 — Verify the deployed tool server against real eBay
+
+```bash
+API_KEY="$(az keyvault secret show --vault-name "$KEY_VAULT" --name connector-api-key --query value -o tsv)"
+
+curl -fsS -H "x-api-key: $API_KEY" "https://$FQDN/tools" | jq '.tools[].name'
+
+curl -fsS -H "x-api-key: $API_KEY" -H 'content-type: application/json' \
+  -d '{"query":"nintendo 64 console","limit":3}' \
+  "https://$FQDN/tools/ebay_search_listings" | jq '.result.listings[0]'
+
+curl -fsS -H "x-api-key: $API_KEY" -H 'content-type: application/json' \
+  -d '{"item":"<an item id returned above>"}' \
+  "https://$FQDN/tools/ebay_get_listing" | jq '{price:.result.listing.price, seller:.result.listing.seller}'
+
+unset API_KEY
+```
+
+Confirm the prices and listing details match the live eBay site, that seller and shipping data behave
+as expected (calculated shipping needs `ebayDeliveryCountry`/`ebayDeliveryPostalCode`), and that no
+response claims sold or completed history — `/version` reports `soldListingData: false`, and the
+Browse API exposes active listings only.
+
+### Step 9 — Verify MCP
+
+Exercise `https://$FQDN/mcp` with an MCP-compatible client. Confirm that:
+
+- an unauthenticated `POST` returns `401`;
+- `initialize` succeeds with the bearer token;
+- `tools/list` returns exactly `ebay_get_listing`, `ebay_search_listings`,
+  `ebay_find_similar_listings`, and `ebay_compare_listings`;
+- one representative read invocation succeeds; and
+- no persistent server-side session is required — each `POST` is independent, and `GET`/`DELETE`
+  return `405`.
+
+### Step 10 — Connect to ChatGPT
+
+Two presentations are supported:
+
+- **OpenAPI action.** Import `https://<host>/openapi.json` and configure API-key authentication with
+  the connector key from Key Vault, sent as a bearer token or `x-api-key`.
+- **Streamable HTTP MCP.** Point an MCP-capable client at `https://<host>/mcp` with the same
+  credential as a bearer token.
+
+Which of these is available depends on the ChatGPT plan and surface in use; verify against the
+current ChatGPT connector configuration rather than assuming. The account-deletion callback is
+deliberately excluded from the OpenAPI document — it is infrastructure for eBay, not a capability for
+an agent to invoke.
+
+`server.json` continues to omit `remotes`: no hosted endpoint is published there, and a private
+deployment URL must not be added to it.
 
 ## Legacy deployment compatibility
 
@@ -123,24 +383,27 @@ Before registration, verify that:
 - the OpenAPI `servers` URL uses the public HTTPS hostname;
 - `/tools` rejects requests without authentication;
 - `/version` reports the expected commit and eBay environment;
+- `/version` reports `capabilities.accountDeletionEndpointConfigured: true`;
 - the configured marketplace and buyer location are appropriate; and
 - application logs reach the intended workspace.
 
 ## Configure eBay behavior
 
-The Bicep template accepts `ebayEnvironment`, `ebayMarketplaceId`, `ebayDeliveryCountry`, and
-`ebayDeliveryPostalCode`. Preview changes before applying them:
+Change `ebayEnvironment`, `ebayMarketplaceId`, `ebayDeliveryCountry`, and `ebayDeliveryPostalCode`
+in `infra/parameters/<environment>.parameters.json` — not on the command line — so the setting
+persists across every subsequent release. Preview the change first:
 
 ```bash
 az deployment sub what-if \
   --location westus2 \
   --template-file infra/main.bicep \
-  --parameters \
-    environmentName=prod \
-    ebayEnvironment=sandbox \
-    ebayMarketplaceId=EBAY_US \
-    ebayDeliveryCountry=US \
-    ebayDeliveryPostalCode=19406
+  --parameters @infra/parameters/prod.parameters.json
+```
+
+Then apply it with a normal deployment:
+
+```bash
+./scripts/bootstrap/deploy.sh <subscription-id> prod westus2
 ```
 
 Buyer country and postal code improve calculated-shipping and delivered-total coverage. They are
@@ -159,6 +422,9 @@ git checkout <reviewed-commit>
 To roll back, check out a previously reviewed commit and run the same command. Each deployment
 performs a health check after the update. Confirm `/version` reports the expected commit before
 closing an incident.
+
+Rolling back the image never rolls back environment configuration: the parameter file at the checked
+out commit is the one that applies, so review it as part of any rollback.
 
 ## Rotate credentials
 
@@ -179,6 +445,24 @@ Container App revision or restart the active revision so Key Vault-backed values
 the credential configured in each client after rotating the connector key, and verify that the old key
 is rejected.
 
+Rotating the account-deletion verification token is a **coordinated** change, because eBay stores its
+own copy. Write the new value, restart the revision, and immediately re-save the callback URL and the
+new token in the eBay developer portal so eBay reissues its challenge against the new value. Until
+both sides agree, the challenge fails and eBay can mark the endpoint down.
+
+```bash
+NEW_TOKEN="$(openssl rand -hex 24)"
+az keyvault secret set \
+  --vault-name "$KEY_VAULT" \
+  --name ebay-account-deletion-token \
+  --value "$NEW_TOKEN" \
+  --output none
+unset NEW_TOKEN
+```
+
+Running `provision.sh` again never rotates any of these secrets; it only creates the ones that are
+missing.
+
 Avoid passing secrets in command history, CI output, issue reports, or screenshots.
 
 ## Monitoring and logs
@@ -192,17 +476,24 @@ az containerapp logs show \
   --follow
 ```
 
-The Bicep template can create an availability test and action group. Set
-`enableHealthAlerts=true` and provide `alertEmails` or `alertSmsPhone` at deployment time. Do not
-commit personal contact details to a parameter file.
+The Bicep template can create an availability test and action group. Set `enableHealthAlerts` to
+`true` and provide `alertEmails` or `alertSmsPhone` in the gitignored
+`infra/parameters/<environment>.local.parameters.json` overlay. Do not commit personal contact
+details to the tracked parameter files.
 
 Monitor at least:
 
 - `/health` availability and latency;
 - HTTP 401, 429, and 5xx rates;
 - eBay OAuth failures, timeouts, and throttling;
+- `ebay.account_deletion.processed` volume and any `412` on the callback, which would mean eBay
+  notifications are being rejected;
 - Container App restarts and failed revisions; and
 - Log Analytics ingestion against its daily cap.
+
+Account-deletion logs deliberately contain no eBay account identifier and no payload. `username`,
+`userId`, and `eiasToken` must never appear in any query result; if they do, treat it as a privacy
+incident and fix the log site before anything else.
 
 ## Troubleshooting
 
@@ -238,6 +529,39 @@ shipping options without a buyer location.
 429 means the connector or eBay rate limit was reached. 504 means `REQUEST_TIMEOUT_MS` elapsed.
 Reduce request volume, retry with backoff, and inspect logs before raising limits or timeouts.
 
+### eBay will not register the account-deletion endpoint
+
+eBay hashes the callback URL verbatim. Compare the string entered in the portal with the value the
+container actually holds; a differing scheme, host, path, or trailing slash produces a different
+`challengeResponse` and registration fails.
+
+```bash
+az containerapp show --name "$APP_NAME" --resource-group "$RESOURCE_GROUP" \
+  --query "properties.template.containers[0].env[?name=='EBAY_ACCOUNT_DELETION_ENDPOINT_URL'].value" -o tsv
+```
+
+### The account-deletion callback returns 404
+
+The route is mounted only when both `EBAY_ACCOUNT_DELETION_ENDPOINT_URL` and
+`EBAY_ACCOUNT_DELETION_VERIFICATION_TOKEN` are present. A partially configured endpoint would answer
+eBay's challenge with the wrong hash, so it is deliberately not mounted at all. Confirm the Key Vault
+secret exists and rerun `deploy.sh`, which supplies the URL.
+
+### The test notification returns 412
+
+The `x-ebay-signature` did not verify. The public key is fetched from
+`https://api.ebay.com/commerce/notification/v1/public_key/{kid}` with an application access token, so
+confirm that the Key Vault eBay credentials are real rather than the provisioning placeholders and
+that the Container App has outbound access to `api.ebay.com`.
+
+### A Container App revision fails with "Unable to get value using Managed identity"
+
+A Key Vault secret referenced by the template does not exist. The current set is `connector-api-key`,
+`ebay-client-id`, `ebay-client-secret`, and `ebay-account-deletion-token`. Rerun `provision.sh`; it
+creates only the missing ones and never rotates an existing value. `deploy.sh` checks for the
+account-deletion secret up front and fails with this remediation rather than producing a broken
+revision.
+
 ## Remove an environment
 
 Export any required logs first. Deleting the generated resource group removes the app, registry,
@@ -247,4 +571,7 @@ vault, and workspace:
 az group delete --name rg-chatgpt-ebay-prod
 ```
 
-Remove client registrations and revoke any copied connector or eBay credentials.
+Remove client registrations and revoke any copied connector or eBay credentials. If the environment
+had a registered account-deletion callback, remove it from the eBay developer portal as well;
+otherwise eBay will keep delivering notifications to a dead URL and eventually mark the endpoint
+down and email the alert contact.

@@ -1,15 +1,25 @@
 {
   "$schema": "https://schema.management.azure.com/schemas/2019-04-01/deploymentParameters.json#",
   "contentVersion": "1.0.0.0",
+  "_comment": [
+    "Canonical environment configuration for the dev deployment. See prod.parameters.json for the",
+    "rules about which values live here, which are supplied on the command line, and which are",
+    "Key Vault secrets."
+  ],
   "parameters": {
     "environmentName": { "value": "dev" },
     "location": { "value": "westus2" },
-    "image": { "value": "REPLACE_WITH_ACR_LOGIN_SERVER/chatgpt-ebay:REPLACE_WITH_TAG" },
-    "publicBaseUrl": { "value": "" },
     "ebayEnvironment": { "value": "sandbox" },
     "ebayMarketplaceId": { "value": "EBAY_US" },
     "ebayDeliveryCountry": { "value": "US" },
     "ebayDeliveryPostalCode": { "value": "" },
-    "logLevel": { "value": "debug" }
+    "logLevel": { "value": "debug" },
+    "minReplicas": { "value": 0 },
+    "maxReplicas": { "value": 2 },
+    "enableHealthAlerts": { "value": false },
+    "alertEmails": { "value": [] },
+    "alertSmsPhone": { "value": "" },
+    "alertSmsCountryCode": { "value": "1" },
+    "tags": { "value": {} }
   }
 }

@@ -31,6 +31,12 @@ param ebayClientIdSecretUri string
 @description('Key Vault secret URI holding the eBay application client secret (Cert ID).')
 param ebayClientSecretSecretUri string
 
+@description('Key Vault secret URI holding the eBay marketplace account deletion verification token.')
+param ebayAccountDeletionTokenSecretUri string
+
+@description('Public HTTPS URL of the eBay marketplace account deletion callback, exactly as registered in the eBay developer portal. Empty until the ingress hostname is known.')
+param accountDeletionEndpointUrl string = ''
+
 @description('Public base URL advertised in the generated OpenAPI document.')
 param publicBaseUrl string = ''
 
@@ -71,7 +77,13 @@ var optionalEnv = concat(
   empty(ebayDeliveryCountry) ? [] : [{ name: 'EBAY_DELIVERY_COUNTRY', value: ebayDeliveryCountry }],
   empty(ebayDeliveryPostalCode)
     ? []
-    : [{ name: 'EBAY_DELIVERY_POSTAL_CODE', value: ebayDeliveryPostalCode }]
+    : [{ name: 'EBAY_DELIVERY_POSTAL_CODE', value: ebayDeliveryPostalCode }],
+  // The verification token is always mounted, but the connector only mounts the callback route
+  // once it also knows the exact URL eBay was given. That URL is unknown until ingress exists, so
+  // the first pass deliberately leaves it empty.
+  empty(accountDeletionEndpointUrl)
+    ? []
+    : [{ name: 'EBAY_ACCOUNT_DELETION_ENDPOINT_URL', value: accountDeletionEndpointUrl }]
 )
 
 resource environment 'Microsoft.App/managedEnvironments@2024-03-01' = {
@@ -138,6 +150,11 @@ resource app 'Microsoft.App/containerApps@2024-03-01' = {
           keyVaultUrl: ebayClientSecretSecretUri
           identity: identityId
         }
+        {
+          name: 'ebay-account-deletion-token'
+          keyVaultUrl: ebayAccountDeletionTokenSecretUri
+          identity: identityId
+        }
       ]
     }
     template: {
@@ -164,6 +181,10 @@ resource app 'Microsoft.App/containerApps@2024-03-01' = {
               { name: 'EBAY_CLIENT_SECRET', secretRef: 'ebay-client-secret' }
               { name: 'EBAY_ENVIRONMENT', value: ebayEnvironment }
               { name: 'EBAY_MARKETPLACE_ID', value: ebayMarketplaceId }
+              {
+                name: 'EBAY_ACCOUNT_DELETION_VERIFICATION_TOKEN'
+                secretRef: 'ebay-account-deletion-token'
+              }
             ],
             optionalEnv
           )

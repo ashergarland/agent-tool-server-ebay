@@ -1,10 +1,14 @@
 #!/usr/bin/env bash
 #
 # Provisions agent-tool-server-ebay while retaining existing chatgpt-ebay Azure deployment names,
-# stores a freshly generated connector API key in Key Vault, and seeds the eBay credentials.
+# stores a freshly generated connector API key and eBay marketplace account deletion verification
+# token in Key Vault, and seeds the eBay credentials.
 #
 # Usage:
-#   ./scripts/bootstrap/provision.sh <subscription-id> [environment] [location]
+#   ./scripts/bootstrap/provision.sh <subscription-id> [environment] [location] [parameter-file]
+#
+# The parameter file defaults to infra/parameters/<environment>.parameters.json and is the
+# canonical source of environment configuration; see scripts/bootstrap/common.sh for precedence.
 #
 # Optionally export EBAY_CLIENT_ID and EBAY_CLIENT_SECRET beforehand and this script will store
 # the real values instead of placeholders.
@@ -13,37 +17,42 @@
 
 set -euo pipefail
 
-SUBSCRIPTION_ID="${1:?usage: provision.sh <subscription-id> [environment] [location]}"
+SUBSCRIPTION_ID="${1:?usage: provision.sh <subscription-id> [environment] [location] [parameter-file]}"
 ENVIRONMENT="${2:-prod}"
 LOCATION="${3:-westus2}"
+PARAMETER_FILE_ARG="${4:-}"
 
 REPO_ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/../.." && pwd)"
 STAMP="$(date +%Y%m%d%H%M%S)"
 
+# shellcheck source=scripts/bootstrap/common.sh
+source "${REPO_ROOT}/scripts/bootstrap/common.sh"
+resolve_parameter_files "${REPO_ROOT}" "${ENVIRONMENT}" "${PARAMETER_FILE_ARG}"
+
 echo "==> Using subscription ${SUBSCRIPTION_ID}"
+echo "==> Environment configuration ${PARAMETER_FILE}"
+if [[ -n "${PARAMETER_OVERLAY}" ]]; then
+  echo "==> Operator overlay ${PARAMETER_OVERLAY}"
+fi
 az account set --subscription "${SUBSCRIPTION_ID}"
 
-# The Container App mounts the connector API key and both eBay credentials straight out of Key
-# Vault, so it cannot be created until those secrets exist. Pass 1 stands up the vault and the
-# identity, we write the secrets, and pass 2 brings the app up.
+# The Container App mounts the connector API key, both eBay credentials and the account deletion
+# verification token straight out of Key Vault, so it cannot be created until those secrets exist.
+# Pass 1 stands up the vault and the identity, we write the secrets, and pass 2 brings the app up.
 FOUNDATION_DEPLOYMENT="chatgpt-ebay-${ENVIRONMENT}-foundation-${STAMP}"
 echo "==> Deploying foundation: identity, registry, vault, logs (${FOUNDATION_DEPLOYMENT})"
 az deployment sub create \
   --name "${FOUNDATION_DEPLOYMENT}" \
   --location "${LOCATION}" \
   --template-file "${REPO_ROOT}/infra/main.bicep" \
+  "${PARAMETER_ARGS[@]}" \
   --parameters environmentName="${ENVIRONMENT}" location="${LOCATION}" deployApp=false \
   --output none
 
-read_output() {
-  az deployment sub show --name "${FOUNDATION_DEPLOYMENT}" \
-    --query "properties.outputs.$1.value" --output tsv
-}
-
-RESOURCE_GROUP="$(read_output resourceGroupName)"
-KEY_VAULT="$(read_output keyVaultName)"
-REGISTRY="$(read_output registryLoginServer)"
-IDENTITY_CLIENT_ID="$(read_output identityClientId)"
+RESOURCE_GROUP="$(deployment_output "${FOUNDATION_DEPLOYMENT}" resourceGroupName)"
+KEY_VAULT="$(deployment_output "${FOUNDATION_DEPLOYMENT}" keyVaultName)"
+REGISTRY="$(deployment_output "${FOUNDATION_DEPLOYMENT}" registryLoginServer)"
+IDENTITY_CLIENT_ID="$(deployment_output "${FOUNDATION_DEPLOYMENT}" identityClientId)"
 
 # The vault uses RBAC authorisation, so subscription Owner alone does not grant data-plane
 # access. Grant the operator the secrets role and wait for it to propagate.
@@ -63,53 +72,73 @@ if ! az role assignment list --assignee "${CALLER_ID}" --scope "${VAULT_ID}" \
 fi
 
 # Creates a secret only when it does not already exist, so re-running never rotates credentials.
-# Returns 0 when it wrote a new value and 1 when one was already there. A failed write aborts the
-# whole script: callers use this in an `if` condition, which suppresses `set -e` inside the
-# function, and silently continuing would fail the app pass with the far more cryptic
-# "Unable to get value using Managed identity ... for secret" that this ordering exists to avoid.
-ensure_secret() {
-  local name="$1"
-  local value="$2"
-  if az keyvault secret show --vault-name "${KEY_VAULT}" --name "${name}" --output none 2>/dev/null; then
-    echo "    ${name}: existing value left untouched."
-    return 1
-  fi
-  if ! az keyvault secret set \
-    --vault-name "${KEY_VAULT}" \
-    --name "${name}" \
-    --value "${value}" \
-    --output none; then
-    echo "    ${name}: FAILED to write." >&2
-    echo "    Check that you hold Key Vault Secrets Officer on ${KEY_VAULT}; the vault uses RBAC" >&2
-    echo "    authorisation, under which subscription Owner alone grants no data-plane access." >&2
-    exit 1
-  fi
-  echo "    ${name}: created."
-  return 0
-}
+# The implementation lives in common.sh so it can be exercised by
+# scripts/verify-parameter-resolution.sh without touching Azure.
 
 echo "==> Seeding secrets in ${KEY_VAULT}"
-if ensure_secret connector-api-key "$(openssl rand -hex 32)"; then
+if ensure_secret "${KEY_VAULT}" "${SECRET_API_KEY}" "$(openssl rand -hex 32)"; then
   echo "    Retrieve the generated connector API key with:"
-  echo "    az keyvault secret show --vault-name ${KEY_VAULT} --name connector-api-key --query value -o tsv"
+  echo "    az keyvault secret show --vault-name ${KEY_VAULT} --name ${SECRET_API_KEY} --query value -o tsv"
 fi
-ensure_secret ebay-client-id "${EBAY_CLIENT_ID:-REPLACE_WITH_EBAY_APP_ID}" || true
-ensure_secret ebay-client-secret "${EBAY_CLIENT_SECRET:-REPLACE_WITH_EBAY_CERT_ID}" || true
+ensure_secret "${KEY_VAULT}" "${SECRET_EBAY_CLIENT_ID}" "${EBAY_CLIENT_ID:-REPLACE_WITH_EBAY_APP_ID}" || true
+ensure_secret "${KEY_VAULT}" "${SECRET_EBAY_CLIENT_SECRET}" "${EBAY_CLIENT_SECRET:-REPLACE_WITH_EBAY_CERT_ID}" || true
+# 48 hexadecimal characters sits inside eBay's documented 32-80 character limit and uses only
+# characters from its allowed alphanumeric/underscore/hyphen set. It is generated rather than
+# supplied so no operator ever has to invent, paste or store one outside Key Vault.
+if ensure_secret "${KEY_VAULT}" "${SECRET_ACCOUNT_DELETION_TOKEN}" "$(openssl rand -hex 24)"; then
+  echo "    Retrieve the generated verification token when registering with eBay:"
+  echo "    az keyvault secret show --vault-name ${KEY_VAULT} --name ${SECRET_ACCOUNT_DELETION_TOKEN} --query value -o tsv"
+fi
+
+APP_NAME="ca-chatgpt-ebay-${ENVIRONMENT}"
+
+# Re-provisioning an environment must not roll the running image back to the placeholder, so the
+# currently deployed image is reused when the app already exists.
+EXISTING_IMAGE="$(az containerapp show --name "${APP_NAME}" --resource-group "${RESOURCE_GROUP}" \
+  --query "properties.template.containers[0].image" --output tsv 2>/dev/null || true)"
+IMAGE_ARGS=()
+if [[ -n "${EXISTING_IMAGE}" ]]; then
+  echo "==> Reusing the image already deployed to ${APP_NAME}"
+  IMAGE_ARGS=(--parameters "image=${EXISTING_IMAGE}")
+fi
+# Expanded through `${a[@]+...}` below because on bash 3.2 — still the default /bin/bash on
+# macOS — expanding an empty array under `set -u` aborts the script with "unbound variable".
 
 # The app's ingress hostname is derived from the managed environment domain, which only exists
-# after the app deployment. Deploy once to create it, then read the FQDN back; deploy.sh keeps
-# PUBLIC_BASE_URL correct from then on.
+# after the app deployment. Deploy once to create it, then read the FQDN back and deploy again so
+# PUBLIC_BASE_URL and the account deletion callback URL are correct from the very first bootstrap.
 APP_DEPLOYMENT="chatgpt-ebay-${ENVIRONMENT}-app-${STAMP}"
 echo "==> Deploying the Container App (${APP_DEPLOYMENT})"
 az deployment sub create \
   --name "${APP_DEPLOYMENT}" \
   --location "${LOCATION}" \
   --template-file "${REPO_ROOT}/infra/main.bicep" \
+  "${PARAMETER_ARGS[@]}" \
   --parameters environmentName="${ENVIRONMENT}" location="${LOCATION}" \
+  ${IMAGE_ARGS[@]+"${IMAGE_ARGS[@]}"} \
   --output none
 
-CONNECTOR_URL="$(az deployment sub show --name "${APP_DEPLOYMENT}" \
-  --query "properties.outputs.connectorUrl.value" --output tsv)"
+CONNECTOR_URL="$(deployment_output "${APP_DEPLOYMENT}" connectorUrl)"
+CALLBACK_URL="$(deployment_output "${APP_DEPLOYMENT}" accountDeletionCallbackUrl)"
+
+FINALIZE_DEPLOYMENT="chatgpt-ebay-${ENVIRONMENT}-urls-${STAMP}"
+echo "==> Applying the public URLs now that ingress exists (${FINALIZE_DEPLOYMENT})"
+az deployment sub create \
+  --name "${FINALIZE_DEPLOYMENT}" \
+  --location "${LOCATION}" \
+  --template-file "${REPO_ROOT}/infra/main.bicep" \
+  "${PARAMETER_ARGS[@]}" \
+  --parameters environmentName="${ENVIRONMENT}" location="${LOCATION}" \
+  --parameters "publicBaseUrl=${CONNECTOR_URL}" \
+  --parameters "accountDeletionEndpointUrl=${CALLBACK_URL}" \
+  ${IMAGE_ARGS[@]+"${IMAGE_ARGS[@]}"} \
+  --output none
+
+if [[ -z "${EXISTING_IMAGE}" ]]; then
+  PLACEHOLDER_NOTE='The app is currently running the placeholder image.'
+else
+  PLACEHOLDER_NOTE="The app is running ${EXISTING_IMAGE}."
+fi
 
 cat <<SUMMARY
 
@@ -120,16 +149,25 @@ cat <<SUMMARY
   Key Vault             ${KEY_VAULT}
   Identity client id    ${IDENTITY_CLIENT_ID}
   Connector URL         ${CONNECTOR_URL}
+  Account deletion URL  ${CALLBACK_URL}
 
-The app is currently running the placeholder image.
+${PLACEHOLDER_NOTE}
+
+Retrieve secrets only when you need them, and do not paste them into shared logs:
+  az keyvault secret show --vault-name ${KEY_VAULT} --name ${SECRET_API_KEY} --query value -o tsv
+  az keyvault secret show --vault-name ${KEY_VAULT} --name ${SECRET_ACCOUNT_DELETION_TOKEN} --query value -o tsv
 
 Next steps:
   1. Store your real eBay application credentials (skip if you exported them above):
-       az keyvault secret set --vault-name ${KEY_VAULT} --name ebay-client-id --value '<App ID>'
-       az keyvault secret set --vault-name ${KEY_VAULT} --name ebay-client-secret --value '<Cert ID>'
+       az keyvault secret set --vault-name ${KEY_VAULT} --name ${SECRET_EBAY_CLIENT_ID} --value '<App ID>'
+       az keyvault secret set --vault-name ${KEY_VAULT} --name ${SECRET_EBAY_CLIENT_SECRET} --value '<Cert ID>'
   2. Build and push the real image:
-       ./scripts/bootstrap/deploy.sh ${SUBSCRIPTION_ID} ${ENVIRONMENT} ${LOCATION}
-  3. Register the connector in ChatGPT using ${CONNECTOR_URL}/openapi.json
+       ./scripts/bootstrap/deploy.sh ${SUBSCRIPTION_ID} ${ENVIRONMENT} ${LOCATION} ${PARAMETER_FILE}
+  3. Register the account deletion callback in the eBay developer portal under
+     Application Keys -> Production keyset -> Alerts & Notifications, using
+       ${CALLBACK_URL}
+     and the verification token above. See docs/deployment.md for the full runbook.
+  4. Register the connector in ChatGPT using ${CONNECTOR_URL}/openapi.json
      with the API key from Key Vault as the bearer token.
 
 SUMMARY

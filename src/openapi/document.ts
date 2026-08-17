@@ -52,6 +52,12 @@ const versionSchema: JsonObject = {
         ebayConfigured: { type: 'boolean' },
         defaultMarketplaceId: { type: 'string' },
         searchMaxLimit: { type: 'integer' },
+        accountDeletionEndpointConfigured: {
+          type: 'boolean',
+          description:
+            'Whether the eBay Marketplace Account Deletion callback is mounted. The callback ' +
+            'URL and its verification token are never exposed.',
+        },
         soldListingData: {
           type: 'boolean',
           description:

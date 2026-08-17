@@ -3,6 +3,11 @@ import { StreamableHTTPServerTransport } from '@modelcontextprotocol/sdk/server/
 import type { Transport } from '@modelcontextprotocol/sdk/shared/transport.js';
 import Fastify, { type FastifyReply, type FastifyRequest } from 'fastify';
 import type { Logger } from 'pino';
+import {
+  ACCOUNT_DELETION_ROUTE_PATH,
+  accountDeletionRoutes,
+  type AccountDeletionService,
+} from '../compliance/ebay-account-deletion/index.js';
 import type { AppConfig } from '../config/index.js';
 import { AppError } from '../errors.js';
 import { createMcpServer } from '../mcp/server.js';
@@ -25,12 +30,17 @@ export interface HttpServerDeps {
   readonly logger: Logger;
   readonly services: Services;
   readonly registry: ToolRegistry;
+  /**
+   * Present only when the deployment is configured for eBay Marketplace Account Deletion. When
+   * absent the public callback route is not mounted at all.
+   */
+  readonly accountDeletion?: AccountDeletionService | undefined;
 }
 
 const MAX_BODY_BYTES = 1_000_000;
 
 export const createHttpServer = (deps: HttpServerDeps): HttpServer => {
-  const { config, logger, services, registry } = deps;
+  const { config, logger, services, registry, accountDeletion } = deps;
   const startedAt = Date.now();
 
   const app = Fastify({
@@ -73,10 +83,33 @@ export const createHttpServer = (deps: HttpServerDeps): HttpServer => {
     done(null, payload);
   });
 
-  /** Authentication + rate limiting for every tool and MCP request. */
+  /**
+   * Authentication + rate limiting for every tool and MCP request.
+   *
+   * The list is an allow-list of *protected* routes matched against the registered route pattern,
+   * not the raw URL, so percent-encoded paths cannot slip past it. Any new route is therefore
+   * public by default only if it is deliberately added outside this list — as the eBay
+   * Marketplace Account Deletion callback is, because eBay cannot present a connector API key.
+   */
   // codeql[js/missing-rate-limiting]
   app.addHook('onRequest', async (request, reply) => {
     const route = request.routeOptions.url;
+
+    if (route === ACCOUNT_DELETION_ROUTE_PATH) {
+      /**
+       * Defence in depth only. The callback is public by necessity, so this bounds a naive flood
+       * by address — but `trustProxy` is enabled, so `request.ip` derives from a caller-supplied
+       * `X-Forwarded-For` and a determined attacker can rotate it. The real ceiling on the
+       * expensive work behind this route is the global outbound budget and negative caching in
+       * `NotificationApiPublicKeyProvider`, which are independent of anything the caller controls.
+       * eBay retries anything it does not receive a 2xx for, so a throttled genuine notification
+       * is redelivered rather than lost.
+       */
+      const decision = preAuthLimiter.consume(`ebay-callback:${request.ip}`);
+      if (!decision.allowed) throw rateLimitExceeded(reply, decision);
+      return;
+    }
+
     if (route !== '/tools' && route !== '/tools/:toolName' && route !== '/mcp') return;
 
     const preAuth = preAuthLimiter.consume(`ip:${request.ip}`);
@@ -111,6 +144,11 @@ export const createHttpServer = (deps: HttpServerDeps): HttpServer => {
       ebayConfigured: config.ebay.configured,
       defaultMarketplaceId: config.ebay.defaultMarketplaceId,
       searchMaxLimit: config.limits.searchMaxLimit,
+      /**
+       * Whether the eBay Marketplace Account Deletion callback is mounted. A boolean only: the
+       * callback URL and its verification token are never exposed here.
+       */
+      accountDeletionEndpointConfigured: accountDeletion !== undefined,
       /**
        * The Browse API only exposes *active* listings. Sold and completed history requires the
        * limited-release Marketplace Insights API, which this connector does not use.
@@ -223,6 +261,14 @@ export const createHttpServer = (deps: HttpServerDeps): HttpServer => {
       .send({ jsonrpc: '2.0', error: { code: -32_000, message: 'Method not allowed' }, id: null });
   app.get('/mcp', rejectMcpStream);
   app.delete('/mcp', rejectMcpStream);
+
+  /**
+   * Registered last and as an encapsulated plugin, so the raw-body JSON parser it installs for
+   * eBay signature verification is scoped to its own route and cannot affect `/tools` or `/mcp`.
+   */
+  if (accountDeletion) {
+    void app.register(accountDeletionRoutes, { service: accountDeletion });
+  }
 
   return app;
 };

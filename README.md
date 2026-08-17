@@ -76,14 +76,20 @@ shapes. Inputs and outputs are validated at the registry boundary.
 
 ## Transports and endpoints
 
-| Method | Path                | Authentication | Purpose                                 |
-| ------ | ------------------- | -------------- | --------------------------------------- |
-| `GET`  | `/health`           | Public         | Liveness and readiness probe            |
-| `GET`  | `/version`          | Public         | Build, provider, and transport metadata |
-| `GET`  | `/openapi.json`     | Public         | Generated OpenAPI 3.1 document          |
-| `GET`  | `/tools`            | Required       | Tool catalogue and JSON Schemas         |
-| `POST` | `/tools/{toolName}` | Required       | Invoke one tool                         |
-| `POST` | `/mcp`              | Required       | Stateless Streamable HTTP MCP           |
+| Method | Path                                               | Authentication | Purpose                                 |
+| ------ | -------------------------------------------------- | -------------- | --------------------------------------- |
+| `GET`  | `/health`                                          | Public         | Liveness and readiness probe            |
+| `GET`  | `/version`                                         | Public         | Build, provider, and transport metadata |
+| `GET`  | `/openapi.json`                                    | Public         | Generated OpenAPI 3.1 document          |
+| `GET`  | `/tools`                                           | Required       | Tool catalogue and JSON Schemas         |
+| `POST` | `/tools/{toolName}`                                | Required       | Invoke one tool                         |
+| `POST` | `/mcp`                                             | Required       | Stateless Streamable HTTP MCP           |
+| `GET`  | `/ebay/notifications/marketplace-account-deletion` | eBay challenge | eBay endpoint validation                |
+| `POST` | `/ebay/notifications/marketplace-account-deletion` | eBay signature | eBay account deletion notification      |
+
+The account-deletion callback is mounted only when both
+`EBAY_ACCOUNT_DELETION_ENDPOINT_URL` and `EBAY_ACCOUNT_DELETION_VERIFICATION_TOKEN` are set. See
+[eBay marketplace account deletion compliance](#ebay-marketplace-account-deletion-compliance).
 
 The Streamable HTTP endpoint creates a fresh MCP server and transport per POST and keeps no
 server-side MCP session store. GET and DELETE return 405 instead of opening persistent streams,
@@ -109,6 +115,11 @@ Inbound caller authentication and outbound eBay credentials are separate:
 - `AUTH_MODE=disabled` is development-only and is rejected in production.
 - eBay uses OAuth client credentials from `EBAY_CLIENT_ID` and `EBAY_CLIENT_SECRET`; tokens are
   cached in memory, refreshed early, and never logged.
+- The eBay account-deletion callback is deliberately unauthenticated by connector key — eBay cannot
+  present one — and is authenticated instead by the `x-ebay-signature` it carries. It is a
+  fixed two-operation surface on one path, is per-address rate limited, bounds its outbound eBay
+  key lookups with a global budget and negative caching, and is excluded from the OpenAPI document
+  and the tool catalogue.
 
 Additional controls include a 1 MB request-body limit, bounded request IDs, per-principal and
 pre-auth rate limiting, provider timeouts and bounded retries, bounded result and comparison sizes,
@@ -120,26 +131,78 @@ message.
 
 Copy `.env.example` and provide placeholders or real values outside source control.
 
-| Variable                                              | Default              | Notes                                               |
-| ----------------------------------------------------- | -------------------- | --------------------------------------------------- |
-| `PORT` / `HOST`                                       | `8080` / `0.0.0.0`   | HTTP listener.                                      |
-| `SERVICE_NAME` / `SERVICE_VERSION`                    | project / `0.1.0`    | Public runtime identity.                            |
-| `LOG_LEVEL`                                           | `info`               | Structured pino logging level.                      |
-| `PUBLIC_BASE_URL`                                     | local URL            | OpenAPI server URL; use public HTTPS when deployed. |
-| `AUTH_MODE` / `API_KEYS`                              | `api-key` / required | Inbound caller authentication.                      |
-| `EBAY_CLIENT_ID` / `EBAY_CLIENT_SECRET`               | unset                | Required together, and required in production.      |
-| `EBAY_ENVIRONMENT`                                    | `production`         | `production` or `sandbox`.                          |
-| `EBAY_MARKETPLACE_ID`                                 | `EBAY_US`            | Default marketplace.                                |
-| `EBAY_OAUTH_SCOPES`                                   | public API scope     | Comma-separated client-credential scopes.           |
-| `EBAY_DELIVERY_COUNTRY` / `EBAY_DELIVERY_POSTAL_CODE` | unset                | Optional buyer context for calculated shipping.     |
-| `EBAY_AFFILIATE_CAMPAIGN_ID`                          | unset                | Optional eBay Partner Network campaign ID.          |
-| `EBAY_SEARCH_DEFAULT_LIMIT` / `EBAY_SEARCH_MAX_LIMIT` | `20` / `50`          | Search result guardrails.                           |
-| `EBAY_COMPARE_MAX_ITEMS`                              | `8`                  | Comparison guardrail; schema maximum is 20.         |
-| `REQUEST_TIMEOUT_MS`                                  | `30000`              | eBay request and OAuth timeout.                     |
-| `RATE_LIMIT_MAX` / `RATE_LIMIT_WINDOW_MS`             | `120` / `60000`      | In-process fixed-window limit; `0` disables.        |
+| Variable                                              | Default              | Notes                                                 |
+| ----------------------------------------------------- | -------------------- | ----------------------------------------------------- |
+| `PORT` / `HOST`                                       | `8080` / `0.0.0.0`   | HTTP listener.                                        |
+| `SERVICE_NAME` / `SERVICE_VERSION`                    | project / `0.1.0`    | Public runtime identity.                              |
+| `LOG_LEVEL`                                           | `info`               | Structured pino logging level.                        |
+| `PUBLIC_BASE_URL`                                     | local URL            | OpenAPI server URL; use public HTTPS when deployed.   |
+| `AUTH_MODE` / `API_KEYS`                              | `api-key` / required | Inbound caller authentication.                        |
+| `EBAY_CLIENT_ID` / `EBAY_CLIENT_SECRET`               | unset                | Required together, and required in production.        |
+| `EBAY_ENVIRONMENT`                                    | `production`         | `production` or `sandbox`.                            |
+| `EBAY_MARKETPLACE_ID`                                 | `EBAY_US`            | Default marketplace.                                  |
+| `EBAY_OAUTH_SCOPES`                                   | public API scope     | Comma-separated client-credential scopes.             |
+| `EBAY_DELIVERY_COUNTRY` / `EBAY_DELIVERY_POSTAL_CODE` | unset                | Optional buyer context for calculated shipping.       |
+| `EBAY_AFFILIATE_CAMPAIGN_ID`                          | unset                | Optional eBay Partner Network campaign ID.            |
+| `EBAY_SEARCH_DEFAULT_LIMIT` / `EBAY_SEARCH_MAX_LIMIT` | `20` / `50`          | Search result guardrails.                             |
+| `EBAY_COMPARE_MAX_ITEMS`                              | `8`                  | Comparison guardrail; schema maximum is 20.           |
+| `REQUEST_TIMEOUT_MS`                                  | `30000`              | eBay request and OAuth timeout.                       |
+| `RATE_LIMIT_MAX` / `RATE_LIMIT_WINDOW_MS`             | `120` / `60000`      | In-process fixed-window limit; `0` disables.          |
+| `EBAY_ACCOUNT_DELETION_ENDPOINT_URL`                  | unset                | Exact public HTTPS callback URL registered with eBay. |
+| `EBAY_ACCOUNT_DELETION_VERIFICATION_TOKEN`            | unset                | **Secret.** 32–80 characters of `A–Z a–z 0–9 _ -`.    |
 
 Blank optional environment variables are normalized to “unset.” This avoids startup failures when
 deployment platforms materialize an omitted optional value as an empty string.
+
+## eBay marketplace account deletion compliance
+
+eBay requires every production application either to expose a Marketplace Account Deletion/Closure
+notification endpoint or to hold an exemption. This server implements the endpoint. It lives in
+[`src/compliance/ebay-account-deletion`](src/compliance/ebay-account-deletion), is self-contained,
+and is registered as an encapsulated Fastify plugin so it can later move behind a shared platform's
+route-extension mechanism without touching the rest of the server.
+
+**Endpoint validation (`GET`).** eBay calls
+`GET <endpoint>?challenge_code=<value>` and the server replies `200 application/json` with
+`{"challengeResponse": "<hex>"}`, where the value is
+`sha256(challengeCode + verificationToken + endpointUrl)` in lowercase hexadecimal. The response is
+produced by a JSON serializer, never by string concatenation, because eBay rejects a body carrying a
+byte order mark. `EBAY_ACCOUNT_DELETION_ENDPOINT_URL` must match the portal entry byte for byte,
+including any trailing slash.
+
+**Notification handling (`POST`).** The `x-ebay-signature` header is base64-decoded into
+`{alg, kid, signature, digest}`; the public key named by `kid` is fetched from the official
+Notification API (`/commerce/notification/v1/public_key/{kid}`) using the same eBay client-credentials
+OAuth machinery the Browse tools already use, and cached for one hour in a size-bounded cache; the
+ECDSA signature is then verified over the received bytes. Only after the signature verifies is the
+payload validated against the `MARKETPLACE_ACCOUNT_DELETION` schema. A verified notification is
+acknowledged with `204`, an unverifiable signature with `412`, and a malformed request with a bounded
+`4xx`.
+
+Because the callback must be public, the key lookup it triggers is bounded independently of anything
+the caller controls: failed lookups are remembered briefly so a replayed unknown `kid` cannot be
+amplified, and a global fixed-window budget caps outbound Notification API calls. A per-address limit
+alone would not do this — the service runs behind ingress with `trustProxy` enabled, so `request.ip`
+comes from a caller-supplied `X-Forwarded-For`.
+
+**Data retention.** The domain deletion step is a deliberate no-op. This server persists no eBay
+listing responses, no eBay user profiles and no notification payloads, and never writes `username`,
+`userId` or `eiasToken` to logs or telemetry — so there is nothing to erase and a redelivery is
+inherently idempotent. Operational logs record only the event name, the eBay-generated notification
+id, the publish attempt count, the duration and the outcome. If persistent eBay user data is ever
+added, `AccountDeletionService.deleteStoredUserData` must delete from it irreversibly before that
+feature can ship.
+
+**Why not the official SDK.** `event-notification-nodejs-sdk` was evaluated first and rejected: it is
+CommonJS-only with no type declarations, last released in June 2023, depends on `axios@^0.21`,
+`express@^4` and `lru-cache@^6` in production, caches keys without a TTL, and logs the closed
+account's `userId` and `username` through `console.log` with no injectable logger. The protocol it
+implements is reproduced here field for field against its `lib/validator.js` and the Notification API
+documentation, with no new runtime dependency.
+
+The full activation runbook — provisioning, registration, the endpoint challenge, the test
+notification, keyset activation and ChatGPT connection — is in
+[docs/deployment.md](docs/deployment.md#post-merge-production-activation-runbook).
 
 ## Local development
 
@@ -167,10 +230,17 @@ npm run openapi:validate
 npm run metadata:validate
 ```
 
-Live Browse tests are opt-in:
+Live Browse tests are opt-in and never run in CI. Supply credentials through the environment
+rather than on the command line so they do not enter shell history:
 
 ```bash
-EBAY_LIVE_TESTS=1 EBAY_CLIENT_ID=... EBAY_CLIENT_SECRET=... npm test
+# Sandbox
+read -rs EBAY_CLIENT_ID; read -rs EBAY_CLIENT_SECRET
+export EBAY_CLIENT_ID EBAY_CLIENT_SECRET
+EBAY_LIVE_TESTS=1 EBAY_ENVIRONMENT=sandbox npm test
+
+# Production, only after the account-deletion endpoint is registered and the keyset is enabled
+EBAY_LIVE_TESTS=1 EBAY_ENVIRONMENT=production npm test
 ```
 
 ## Container
@@ -199,16 +269,39 @@ Vault secret-read access on its vault.
 
 ```bash
 EBAY_CLIENT_ID=... EBAY_CLIENT_SECRET=... \
-  ./scripts/bootstrap/provision.sh <subscription-id> prod westus2
-./scripts/bootstrap/deploy.sh <subscription-id> prod westus2
+  ./scripts/bootstrap/provision.sh <subscription-id> prod westus2 infra/parameters/prod.parameters.json
+./scripts/bootstrap/deploy.sh <subscription-id> prod westus2 infra/parameters/prod.parameters.json
 ```
 
-Provisioning is intentionally two-pass. Pass one creates the identity, registry, vault, logging,
+The parameter file is optional on the command line — both scripts default to
+`infra/parameters/<environment>.parameters.json` — but it is never optional to the deployment.
+Every `az deployment sub create` in both scripts passes it, so a release cannot silently reapply a
+Bicep default for the eBay environment, marketplace, buyer delivery context, log level, replica
+scaling or alerting. Parameter precedence, lowest to highest:
+
+1. defaults declared in `infra/main.bicep`;
+2. `infra/parameters/<environment>.parameters.json` — committed, canonical, required;
+3. `infra/parameters/<environment>.local.parameters.json` — gitignored operator overlay for
+   account-specific values such as alert recipients;
+4. release-specific command-line values: `image`, `publicBaseUrl`, `accountDeletionEndpointUrl`
+   and `deployApp`.
+
+Secrets never appear in any of these: the connector API key, the eBay client id and secret, and the
+eBay account-deletion verification token live only in Key Vault and reach the Container App as
+managed secret references.
+
+Provisioning is intentionally multi-pass. Pass one creates the identity, registry, vault, logging,
 and role assignments. The script grants the current operator Key Vault secret-write access, waits
-for propagation, and writes required secrets; a failed write aborts. Pass two creates the app only
-after its managed identity can resolve the Key Vault references. `deploy.sh` then builds a
-commit-tagged image, reads the existing public hostname, redeploys with that image and
-`PUBLIC_BASE_URL`, and verifies health. Commit tags provide a rollback target.
+for propagation, and writes required secrets; a failed write aborts and an existing secret is never
+rotated. Pass two creates the app only after its managed identity can resolve the Key Vault
+references. Pass three applies `PUBLIC_BASE_URL` and the account-deletion callback URL, which cannot
+be known until ingress exists. `deploy.sh` then builds a commit-tagged image, reads the existing
+public hostname, redeploys with that image and both URLs, and verifies health. Commit tags provide a
+rollback target.
+
+Both scripts print the connector, health, OpenAPI, MCP and account-deletion callback URLs, the Key
+Vault name, and the commands for retrieving the connector API key and the verification token. Neither
+secret value is ever printed automatically.
 
 ### Retained legacy Azure names
 
@@ -278,27 +371,34 @@ The application has no runtime dependency on the family registry.
 ## Testing and CI
 
 Vitest covers configuration normalization, authentication, rate limiting, provider/OAuth behavior,
-normalization, service guardrails, all tool schemas, OpenAPI, HTTP, stdio-compatible MCP, and
-Streamable HTTP MCP. Fakes prevent default tests from calling eBay.
+normalization, service guardrails, all tool schemas, OpenAPI, HTTP, stdio-compatible MCP,
+Streamable HTTP MCP, eBay account-deletion challenge/schema/signature/public-key-caching behavior,
+and deployment parameter integrity. Fakes prevent default tests from calling eBay; the
+account-deletion signature fixtures generate their own P-256 key pair, so no eBay credential is ever
+required.
 
 CI enforces lockfile installation, formatting, lint, typecheck, coverage, production build,
-OpenAPI generation, official-schema `server.json` validation, container build and smoke tests,
-Bicep build/lint, shell syntax, dependency audit/review, secret scanning, and CodeQL. CI does not
-deploy.
+OpenAPI generation, official-schema `server.json` validation, container build and smoke tests
+(including a live challenge-hash check computed independently with `openssl`), Bicep build/lint,
+shell syntax, deployment parameter resolution, dependency audit/review, secret scanning, and CodeQL.
+CI does not deploy.
 
 ## Troubleshooting
 
-| Symptom                                | Likely cause and response                                                                                        |
-| -------------------------------------- | ---------------------------------------------------------------------------------------------------------------- |
-| Startup `ConfigurationError`           | Correct the named variable; common causes are short keys, partial eBay credentials, or disabled production auth. |
-| `/tools` or `/mcp` returns 401         | Supply the configured `x-api-key` or bearer token.                                                               |
-| eBay returns 401/403                   | Match the keyset to `EBAY_ENVIRONMENT`; production Browse access may require approval.                           |
-| Listing is 404 but exists in a browser | Pass its marketplace or use the full eBay country-site URL.                                                      |
-| Delivered total is missing             | eBay omitted shipping; configure buyer country and postal code.                                                  |
-| Search has no sold results             | Expected: Browse search contains active listings only.                                                           |
-| First Azure deployment cannot read KV  | Use `provision.sh`; do not skip its foundation, role propagation, and secret-write pass.                         |
-| OpenAPI advertises localhost           | Run `deploy.sh` so it discovers the existing FQDN and sets `PUBLIC_BASE_URL`.                                    |
-| First request is slow                  | A scale-to-zero cold start is expected; raise `minReplicas` only after accepting the cost.                       |
+| Symptom                                | Likely cause and response                                                                                                                                    |
+| -------------------------------------- | ------------------------------------------------------------------------------------------------------------------------------------------------------------ |
+| Startup `ConfigurationError`           | Correct the named variable; common causes are short keys, partial eBay credentials, or disabled production auth.                                             |
+| `/tools` or `/mcp` returns 401         | Supply the configured `x-api-key` or bearer token.                                                                                                           |
+| eBay returns 401/403                   | Match the keyset to `EBAY_ENVIRONMENT`; production Browse access may require approval.                                                                       |
+| Listing is 404 but exists in a browser | Pass its marketplace or use the full eBay country-site URL.                                                                                                  |
+| Delivered total is missing             | eBay omitted shipping; configure buyer country and postal code.                                                                                              |
+| Search has no sold results             | Expected: Browse search contains active listings only.                                                                                                       |
+| First Azure deployment cannot read KV  | Use `provision.sh`; do not skip its foundation, role propagation, and secret-write pass.                                                                     |
+| OpenAPI advertises localhost           | Run `deploy.sh` so it discovers the existing FQDN and sets `PUBLIC_BASE_URL`.                                                                                |
+| First request is slow                  | A scale-to-zero cold start is expected; raise `minReplicas` only after accepting the cost.                                                                   |
+| eBay rejects the callback registration | The hashed endpoint must equal the portal entry exactly; compare `EBAY_ACCOUNT_DELETION_ENDPOINT_URL` character for character, including any trailing slash. |
+| Callback returns 404                   | Both `EBAY_ACCOUNT_DELETION_ENDPOINT_URL` and `EBAY_ACCOUNT_DELETION_VERIFICATION_TOKEN` must be set; the route is unmounted otherwise.                      |
+| Test notification returns 412          | The signature did not verify. Confirm the deployment can reach `api.ebay.com` and that the eBay credentials in Key Vault are real.                           |
 
 ## Contributing and security
 

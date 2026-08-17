@@ -20,6 +20,8 @@ const REDACTED_PATHS = [
   'accessToken',
   'clientSecret',
   'client_secret',
+  'verificationToken',
+  'challengeResponse',
   '*.password',
   '*.secret',
   '*.token',
@@ -27,6 +29,7 @@ const REDACTED_PATHS = [
   '*.accessToken',
   '*.clientSecret',
   '*.client_secret',
+  '*.verificationToken',
 ];
 
 export const createLogger = (config: AppConfig): Logger => {
