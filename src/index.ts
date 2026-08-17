@@ -42,7 +42,7 @@ const main = async (): Promise<void> => {
       ebayConfigured: config.ebay.configured,
       defaultMarketplaceId: config.ebay.defaultMarketplaceId,
     },
-    'chatgpt-ebay connector listening',
+    'agent-tool-server-ebay listening',
   );
 };
 

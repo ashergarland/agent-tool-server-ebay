@@ -1,7 +1,10 @@
 import { describe, expect, it } from 'vitest';
 import type { Logger } from 'pino';
 import { Client } from '@modelcontextprotocol/sdk/client/index.js';
+import { StreamableHTTPClientTransport } from '@modelcontextprotocol/sdk/client/streamableHttp.js';
 import { InMemoryTransport } from '@modelcontextprotocol/sdk/inMemory.js';
+import type { Transport } from '@modelcontextprotocol/sdk/shared/transport.js';
+import { createApplication } from '../../src/app.js';
 import { createMcpServer } from '../../src/mcp/server.js';
 import { createServices } from '../../src/services/index.js';
 import { createToolRegistry } from '../../src/tools/registry.js';
@@ -22,6 +25,25 @@ const connect = async () => {
   return { client, server, provider, registry };
 };
 
+const API_KEY = 'test-api-key-that-is-long-enough-000000';
+
+const connectHttp = async () => {
+  const config = testConfig({ AUTH_MODE: 'api-key', API_KEYS: API_KEY });
+  const provider = createFakeProvider();
+  const app = createApplication({
+    config,
+    provider,
+    logger: createTestLogger() as unknown as Logger,
+  });
+  const address = await app.http.listen({ host: '127.0.0.1', port: 0 });
+  const transport = new StreamableHTTPClientTransport(new URL('/mcp', address), {
+    requestInit: { headers: { 'x-api-key': API_KEY } },
+  });
+  const client = new Client({ name: 'http-test-client', version: '1.0.0' });
+  await client.connect(transport as unknown as Transport);
+  return { app, client, transport };
+};
+
 describe('MCP transport', () => {
   it('exposes exactly the tools in the shared registry', async () => {
     const { client, server, registry } = await connect();
@@ -38,6 +60,65 @@ describe('MCP transport', () => {
     await client.close();
   });
 
+  it('serves the shared registry over authenticated stateless Streamable HTTP', async () => {
+    const { app, client, transport } = await connectHttp();
+
+    const listed = await client.listTools();
+    expect(listed.tools.map((tool) => tool.name).sort()).toEqual(
+      app.registry
+        .list()
+        .map((tool) => tool.name)
+        .sort(),
+    );
+
+    await client.close();
+    await transport.close();
+    await app.http.close();
+  });
+
+  it('requires authentication for Streamable HTTP MCP', async () => {
+    const app = createApplication({
+      config: testConfig({ AUTH_MODE: 'api-key', API_KEYS: API_KEY }),
+      provider: createFakeProvider(),
+      logger: createTestLogger() as unknown as Logger,
+    });
+    const response = await app.http.inject({
+      method: 'POST',
+      url: '/mcp',
+      payload: {
+        jsonrpc: '2.0',
+        id: 1,
+        method: 'initialize',
+        params: {
+          protocolVersion: '2025-06-18',
+          capabilities: {},
+          clientInfo: { name: 'unauthenticated-test', version: '1.0.0' },
+        },
+      },
+    });
+
+    expect(response.statusCode).toBe(401);
+    await app.http.close();
+  });
+
+  it('rejects persistent MCP streams to remain stateless and scale-to-zero compatible', async () => {
+    const app = createApplication({
+      config: testConfig({ AUTH_MODE: 'api-key', API_KEYS: API_KEY }),
+      provider: createFakeProvider(),
+      logger: createTestLogger() as unknown as Logger,
+    });
+    for (const method of ['GET', 'DELETE'] as const) {
+      const response = await app.http.inject({
+        method,
+        url: '/mcp',
+        headers: { 'x-api-key': API_KEY },
+      });
+      expect(response.statusCode).toBe(405);
+      expect(response.headers['allow']).toBe('POST');
+    }
+    await app.http.close();
+  });
+
   it('annotates every tool as read-only and non-destructive', async () => {
     const { client, server } = await connect();
 
@@ -48,6 +129,7 @@ describe('MCP transport', () => {
         idempotentHint: true,
         openWorldHint: true,
       });
+      expect(tool.outputSchema).toMatchObject({ type: 'object' });
     }
 
     await server.close();

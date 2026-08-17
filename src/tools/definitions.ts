@@ -143,7 +143,12 @@ const returnTermsSchema = z.object({
 const availabilitySchema = z.object({
   status: z.string().optional().describe('IN_STOCK or OUT_OF_STOCK.'),
   availableQuantity: z.number().optional(),
-  soldQuantity: z.number().optional(),
+  soldQuantity: z
+    .number()
+    .optional()
+    .describe(
+      'Estimated sold quantity when eBay returns estimatedSoldQuantity for the active listing; not completed-listing history.',
+    ),
   threshold: z.number().optional(),
   thresholdType: z.string().optional(),
   deliveryOptions: z.array(z.string()),

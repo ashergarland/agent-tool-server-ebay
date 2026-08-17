@@ -53,7 +53,9 @@ const erase = (definition: ToolDefinition): RegisteredTool => ({
     }
 
     try {
-      return await definition.handler(parsed.data, services, context);
+      return definition.outputSchema.parse(
+        await definition.handler(parsed.data, services, context),
+      );
     } catch (error) {
       throw toAppError(error);
     }

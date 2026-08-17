@@ -59,6 +59,7 @@ export interface ReturnTerms {
 export interface Availability {
   readonly status: string | undefined;
   readonly availableQuantity: number | undefined;
+  /** Browse API estimatedSoldQuantity for this active listing, when eBay returns it. */
   readonly soldQuantity: number | undefined;
   readonly threshold: number | undefined;
   readonly thresholdType: string | undefined;

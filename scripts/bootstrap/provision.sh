@@ -1,7 +1,7 @@
 #!/usr/bin/env bash
 #
-# Provisions the chatgpt-ebay connector infrastructure, stores a freshly generated connector API
-# key in Key Vault, and seeds the eBay application credentials.
+# Provisions agent-tool-server-ebay while retaining existing chatgpt-ebay Azure deployment names,
+# stores a freshly generated connector API key in Key Vault, and seeds the eBay credentials.
 #
 # Usage:
 #   ./scripts/bootstrap/provision.sh <subscription-id> [environment] [location]

@@ -1,8 +1,12 @@
 # Deployment and operations
 
 This guide covers the repository's Azure Container Apps deployment. Read the
-[security considerations](../README.md#security-considerations) before using production
+[authentication and security](../README.md#authentication-and-security) before using production
 credentials.
+
+The repository is now `agent-tool-server-ebay`, but existing Azure resource and private image
+names retain the earlier `chatgpt-ebay` identifier. This is intentional compatibility behavior,
+not stale public branding; see [Legacy deployment compatibility](#legacy-deployment-compatibility).
 
 ## What gets deployed
 
@@ -67,6 +71,21 @@ The initial app uses a placeholder image. `deploy.sh` builds the current commit 
 Container App, sets its public URL, and verifies `/health`. Do not register the connector before
 this step: until the real hostname is supplied, the generated OpenAPI document advertises
 localhost.
+
+## Legacy deployment compatibility
+
+The Bicep defaults and bootstrap scripts continue to find and update the deployed
+`rg-chatgpt-ebay-*`, `ca-chatgpt-ebay-*`, `cae-chatgpt-ebay-*`, `id-chatgpt-ebay-*`, and
+`log-chatgpt-ebay-*` resources, the generated `acrchatgptebay*` registry and `kv-cgeb-*` vault, the
+private `chatgpt-ebay` ACR repository, and the existing `chatgpt-ebay-*` deployment and monitoring
+history. Changing those values in place would create or target different resources and could
+orphan Key Vault secrets, managed-identity assignments, monitoring, revisions, rollback tags, or
+the stable Container App hostname.
+
+The application identity is separate: Bicep sets `SERVICE_NAME=agent-tool-server-ebay`, and public
+package, image examples, metadata, and documentation use the new name. A fully renamed Azure
+environment is optional follow-up work requiring a planned secret, identity, DNS, RBAC, monitoring,
+and rollback migration. These scripts do not perform that destructive migration.
 
 ## Verify the deployment
 
@@ -157,7 +176,7 @@ unset NEW_API_KEY
 
 Set new eBay credentials in the `ebay-client-id` and `ebay-client-secret` secrets. Create a new
 Container App revision or restart the active revision so Key Vault-backed values are re-read. Update
-the credential configured in ChatGPT after rotating the connector key, and verify that the old key
+the credential configured in each client after rotating the connector key, and verify that the old key
 is rejected.
 
 Avoid passing secrets in command history, CI output, issue reports, or screenshots.
@@ -228,4 +247,4 @@ vault, and workspace:
 az group delete --name rg-chatgpt-ebay-prod
 ```
 
-Remove the connector registration from ChatGPT and revoke any copied connector or eBay credentials.
+Remove client registrations and revoke any copied connector or eBay credentials.

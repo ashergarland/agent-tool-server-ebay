@@ -157,7 +157,7 @@ resource app 'Microsoft.App/containerApps@2024-03-01' = {
               { name: 'NODE_ENV', value: 'production' }
               { name: 'PORT', value: '8080' }
               { name: 'LOG_LEVEL', value: logLevel }
-              { name: 'SERVICE_NAME', value: appName }
+              { name: 'SERVICE_NAME', value: 'agent-tool-server-ebay' }
               { name: 'AUTH_MODE', value: 'api-key' }
               { name: 'API_KEYS', secretRef: 'connector-api-key' }
               { name: 'EBAY_CLIENT_ID', secretRef: 'ebay-client-id' }

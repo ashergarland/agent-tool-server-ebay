@@ -44,6 +44,12 @@ describe('ToolRegistry', () => {
     }
   });
 
+  it('describes sold quantity as an estimate on an active listing, not sales history', () => {
+    const schema = registry.get('ebay_get_listing').outputJsonSchema;
+    expect(JSON.stringify(schema)).toContain('Estimated sold quantity');
+    expect(JSON.stringify(schema)).toContain('not completed-listing history');
+  });
+
   it('gives every tool a description long enough to guide tool choice', () => {
     for (const tool of registry.list()) {
       expect(tool.summary.length).toBeGreaterThan(20);
@@ -60,6 +66,25 @@ describe('ToolRegistry', () => {
     expect(() => registry.get('ebay_nope')).toThrowError(
       expect.objectContaining({ code: 'not_found' }) as unknown,
     );
+  });
+
+  it('validates handler output before returning it to any transport', async () => {
+    const invalidOutput = {
+      name: 'ebay_invalid_output',
+      title: 'Invalid output fixture',
+      summary: 'Test-only tool with deliberately invalid handler output.',
+      description:
+        'This test-only definition proves that every transport receives output validated by the shared registry boundary.',
+      kind: 'read',
+      inputSchema: z.object({}),
+      outputSchema: z.object({ value: z.string() }),
+      handler: () => Promise.resolve({ value: 42 }),
+    } as unknown as ToolDefinition;
+    const { services } = buildServices();
+
+    await expect(
+      createToolRegistry([invalidOutput]).invoke('ebay_invalid_output', {}, services, context),
+    ).rejects.toThrowError(expect.objectContaining({ code: 'internal_error' }) as unknown);
   });
 });
 

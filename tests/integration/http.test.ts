@@ -33,7 +33,7 @@ describe('HTTP surface', () => {
   it('serves an unauthenticated health probe', async () => {
     const response = await app.http.inject({ method: 'GET', url: '/health' });
     expect(response.statusCode).toBe(200);
-    expect(response.json()).toMatchObject({ status: 'ok', service: 'chatgpt-ebay' });
+    expect(response.json()).toMatchObject({ status: 'ok', service: 'agent-tool-server-ebay' });
   });
 
   it('serves version and capability metadata without auth', async () => {
@@ -42,6 +42,7 @@ describe('HTTP surface', () => {
     expect(response.json()).toMatchObject({
       version: '1.2.3',
       capabilities: {
+        transports: ['stdio', 'streamable-http', 'openapi-http'],
         authMode: 'api-key',
         ebayEnvironment: 'production',
         ebayConfigured: true,
@@ -64,6 +65,31 @@ describe('HTTP surface', () => {
     const response = await app.http.inject({ method: 'GET', url: '/tools' });
     expect(response.statusCode).toBe(401);
     expect(response.json().error).toMatchObject({ code: 'unauthorized', retryable: false });
+  });
+
+  it('cannot bypass protected-route authentication with percent-encoded paths', async () => {
+    const toolResponse = await app.http.inject({
+      method: 'POST',
+      url: '/%74ools/ebay_get_listing',
+      payload: { item: '407111131587' },
+    });
+    const mcpResponse = await app.http.inject({
+      method: 'POST',
+      url: '/%6dcp',
+      payload: {
+        jsonrpc: '2.0',
+        id: 1,
+        method: 'initialize',
+        params: {
+          protocolVersion: '2025-06-18',
+          capabilities: {},
+          clientInfo: { name: 'encoded-path-test', version: '1.0.0' },
+        },
+      },
+    });
+
+    expect(toolResponse.statusCode).toBe(401);
+    expect(mcpResponse.statusCode).toBe(401);
   });
 
   it('rejects an incorrect api key', async () => {
@@ -179,7 +205,7 @@ describe('HTTP surface', () => {
 
     const document = response.json();
     expect(document.openapi).toBe('3.1.0');
-    expect(document.info.title).toBe('ChatGPT eBay Connector');
+    expect(document.info.title).toBe('eBay Marketplace');
     expect(document.info.description).toMatch(/active listings only/);
     for (const tool of app.registry.list()) {
       expect(document.paths[`/tools/${tool.name}`]).toBeDefined();

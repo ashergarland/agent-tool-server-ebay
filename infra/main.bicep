@@ -1,7 +1,8 @@
 targetScope = 'subscription'
 
 metadata description = '''
-Deploys the chatgpt-ebay connector: a user-assigned managed identity, a container registry,
+Deploys the agent-tool-server-ebay service while retaining legacy Azure resource names: a
+user-assigned managed identity, a container registry,
 a Key Vault holding the connector API key and the eBay application credentials, a Log Analytics
 workspace, and a Container App that runs the connector image. The identity is deliberately given
 no Azure data-plane RBAC beyond pulling its own image and reading its own Key Vault secrets — the
@@ -66,7 +67,7 @@ param alertSmsCountryCode string = '1'
 
 var suffix = uniqueString(subscription().id, resourceGroupName)
 var defaultTags = union(tags, {
-  workload: 'chatgpt-ebay'
+  workload: 'agent-tool-server-ebay'
   environment: environmentName
   managedBy: 'bicep'
 })
