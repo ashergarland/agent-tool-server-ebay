@@ -3,7 +3,8 @@ targetScope = 'subscription'
 metadata description = '''
 Deploys the agent-tool-server-ebay service while retaining legacy Azure resource names: a
 user-assigned managed identity, a container registry,
-a Key Vault holding the connector API key and the eBay application credentials, a Log Analytics
+a Key Vault holding the connector API key, the eBay application credentials and the eBay
+marketplace account deletion verification token, a Log Analytics
 workspace, and a Container App that runs the connector image. The identity is deliberately given
 no Azure data-plane RBAC beyond pulling its own image and reading its own Key Vault secrets — the
 connector only talks to the public eBay APIs.
@@ -43,11 +44,28 @@ param ebayDeliveryPostalCode string = ''
 @allowed(['fatal', 'error', 'warn', 'info', 'debug', 'trace'])
 param logLevel string = 'info'
 
+@description('''
+Public HTTPS URL of the eBay Marketplace Account Deletion/Closure callback, exactly as registered
+in the eBay developer portal. It is derived from the ingress hostname and is therefore supplied by
+the bootstrap scripts once the Container App exists; it is not part of the environment parameter
+file. The verification token that pairs with it is a Key Vault secret, never a parameter.
+''')
+param accountDeletionEndpointUrl string = ''
+
+@description('Minimum number of replicas. Zero lets the app scale to nothing when idle.')
+@minValue(0)
+param minReplicas int = 0
+
+@description('Maximum number of replicas.')
+@minValue(1)
+param maxReplicas int = 3
+
 @description('Additional tags applied to every resource.')
 param tags object = {}
 
 @description('''
-Deploy the Container App. The app mounts its connector API key and eBay credentials from Key
+Deploy the Container App. The app mounts its connector API key, eBay credentials and eBay
+account deletion verification token from Key
 Vault, so the very first provisioning pass must run with this set to false: it creates the vault
 and the identity, the bootstrap script writes the secrets, and the second pass brings the app up.
 ''')
@@ -135,12 +153,16 @@ module containerApp 'modules/container-app.bicep' = if (deployApp) {
     apiKeySecretUri: '${keyVault.outputs.uri}secrets/connector-api-key'
     ebayClientIdSecretUri: '${keyVault.outputs.uri}secrets/ebay-client-id'
     ebayClientSecretSecretUri: '${keyVault.outputs.uri}secrets/ebay-client-secret'
+    ebayAccountDeletionTokenSecretUri: '${keyVault.outputs.uri}secrets/ebay-account-deletion-token'
     publicBaseUrl: publicBaseUrl
     ebayEnvironment: ebayEnvironment
     ebayMarketplaceId: ebayMarketplaceId
     ebayDeliveryCountry: ebayDeliveryCountry
     ebayDeliveryPostalCode: ebayDeliveryPostalCode
+    accountDeletionEndpointUrl: accountDeletionEndpointUrl
     logLevel: logLevel
+    minReplicas: minReplicas
+    maxReplicas: maxReplicas
   }
 }
 
@@ -169,3 +191,11 @@ output registryLoginServer string = registry.outputs.loginServer
 output keyVaultName string = keyVault.outputs.name
 output connectorUrl string = deployApp ? 'https://${containerApp!.outputs.fqdn}' : ''
 output openApiUrl string = deployApp ? 'https://${containerApp!.outputs.fqdn}/openapi.json' : ''
+output mcpUrl string = deployApp ? 'https://${containerApp!.outputs.fqdn}/mcp' : ''
+
+// The exact string the operator pastes into the eBay developer portal. It must match the value
+// passed as accountDeletionEndpointUrl byte for byte, because eBay hashes it during endpoint
+// validation.
+output accountDeletionCallbackUrl string = deployApp
+  ? 'https://${containerApp!.outputs.fqdn}/ebay/notifications/marketplace-account-deletion'
+  : ''

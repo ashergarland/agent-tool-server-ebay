@@ -1,4 +1,8 @@
 import type { Logger } from 'pino';
+import {
+  createAccountDeletionService,
+  type AccountDeletionService,
+} from './compliance/ebay-account-deletion/index.js';
 import { loadConfig, type AppConfig } from './config/index.js';
 import { createEbayProvider } from './provider/ebay/index.js';
 import type { EbayProvider } from './provider/types.js';
@@ -14,6 +18,8 @@ export interface Application {
   readonly services: Services;
   readonly registry: ToolRegistry;
   readonly http: HttpServer;
+  /** Undefined unless the deployment is configured for eBay account-deletion compliance. */
+  readonly accountDeletion: AccountDeletionService | undefined;
 }
 
 export interface CreateApplicationOptions {
@@ -21,6 +27,8 @@ export interface CreateApplicationOptions {
   readonly logger?: Logger;
   /** Injectable for tests; defaults to the real eBay Browse API adapter. */
   readonly provider?: EbayProvider;
+  /** Injectable for tests; defaults to the configuration-derived compliance service. */
+  readonly accountDeletion?: AccountDeletionService | undefined;
 }
 
 /**
@@ -51,7 +59,19 @@ export const createApplication = (options: CreateApplicationOptions = {}): Appli
   const provider = options.provider ?? lazyProvider(config);
   const services = createServices(config, provider, logger);
   const registry = createToolRegistry();
-  const http = createHttpServer({ config, logger, services, registry });
+  const accountDeletion = options.accountDeletion ?? createAccountDeletionService(config);
 
-  return { config, logger, services, registry, http };
+  logger.info(
+    {
+      event: 'ebay.account_deletion.configuration',
+      mounted: accountDeletion !== undefined,
+    },
+    accountDeletion
+      ? 'eBay marketplace account deletion callback is mounted'
+      : 'eBay marketplace account deletion callback is not configured; the route is not mounted',
+  );
+
+  const http = createHttpServer({ config, logger, services, registry, accountDeletion });
+
+  return { config, logger, services, registry, http, accountDeletion };
 };

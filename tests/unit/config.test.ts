@@ -236,3 +236,162 @@ describe('blank environment values', () => {
     expect(config.service.publicBaseUrl).toBeUndefined();
   });
 });
+
+/**
+ * eBay Marketplace Account Deletion/Closure compliance configuration. The verification token is a
+ * secret: it must never reach a response, a log line or a validation error.
+ */
+describe('account deletion configuration', () => {
+  const TOKEN = 'example-compliance-verification-token-0001';
+  const ENDPOINT = 'https://connector.example.com/ebay/notifications/marketplace-account-deletion';
+
+  const production = {
+    NODE_ENV: 'production',
+    AUTH_MODE: 'api-key',
+    API_KEYS: 'k'.repeat(32),
+    EBAY_CLIENT_ID: 'id',
+    EBAY_CLIENT_SECRET: 'secret',
+  } satisfies NodeJS.ProcessEnv;
+
+  it('accepts a valid production configuration', () => {
+    const config = loadConfig({
+      ...production,
+      EBAY_ACCOUNT_DELETION_ENDPOINT_URL: ENDPOINT,
+      EBAY_ACCOUNT_DELETION_VERIFICATION_TOKEN: TOKEN,
+    });
+
+    expect(config.ebay.accountDeletion).toEqual({
+      endpointUrl: ENDPOINT,
+      verificationToken: TOKEN,
+    });
+  });
+
+  it('preserves the endpoint URL byte for byte, including a trailing slash', () => {
+    const config = loadConfig({
+      ...production,
+      EBAY_ACCOUNT_DELETION_ENDPOINT_URL: `${ENDPOINT}/`,
+      EBAY_ACCOUNT_DELETION_VERIFICATION_TOKEN: TOKEN,
+    });
+
+    expect(config.ebay.accountDeletion?.endpointUrl).toBe(`${ENDPOINT}/`);
+  });
+
+  it('leaves compliance unconfigured when neither value is supplied', () => {
+    expect(load().ebay.accountDeletion).toBeUndefined();
+  });
+
+  it('treats blank deployment values as unset rather than invalid', () => {
+    const config = loadConfig({
+      ...production,
+      EBAY_ACCOUNT_DELETION_ENDPOINT_URL: '',
+      EBAY_ACCOUNT_DELETION_VERIFICATION_TOKEN: '',
+    });
+
+    expect(config.ebay.accountDeletion).toBeUndefined();
+  });
+
+  it('keeps the token alone harmless while the endpoint URL is still unknown', () => {
+    const config = loadConfig({
+      ...production,
+      EBAY_ACCOUNT_DELETION_ENDPOINT_URL: '',
+      EBAY_ACCOUNT_DELETION_VERIFICATION_TOKEN: TOKEN,
+    });
+
+    expect(config.ebay.accountDeletion).toBeUndefined();
+  });
+
+  it('requires a verification token once an endpoint URL is configured', () => {
+    expect(() =>
+      loadConfig({ ...production, EBAY_ACCOUNT_DELETION_ENDPOINT_URL: ENDPOINT }),
+    ).toThrow(ConfigurationError);
+  });
+
+  it('rejects a malformed endpoint URL', () => {
+    expect(() =>
+      loadConfig({
+        ...production,
+        EBAY_ACCOUNT_DELETION_ENDPOINT_URL: 'not-a-url',
+        EBAY_ACCOUNT_DELETION_VERIFICATION_TOKEN: TOKEN,
+      }),
+    ).toThrow(ConfigurationError);
+  });
+
+  it('rejects a plaintext HTTP endpoint in production', () => {
+    expect(() =>
+      loadConfig({
+        ...production,
+        EBAY_ACCOUNT_DELETION_ENDPOINT_URL: ENDPOINT.replace('https://', 'http://'),
+        EBAY_ACCOUNT_DELETION_VERIFICATION_TOKEN: TOKEN,
+      }),
+    ).toThrow(/https/);
+  });
+
+  it('allows a plaintext HTTP endpoint outside production for local testing', () => {
+    const config = load({
+      EBAY_ACCOUNT_DELETION_ENDPOINT_URL:
+        'http://localhost:8080/ebay/notifications/marketplace-account-deletion',
+      EBAY_ACCOUNT_DELETION_VERIFICATION_TOKEN: TOKEN,
+    });
+
+    expect(config.ebay.accountDeletion?.endpointUrl).toContain('http://localhost');
+  });
+
+  it('rejects an endpoint URL carrying a query string or fragment', () => {
+    for (const suffix of ['?a=b', '#fragment']) {
+      expect(() =>
+        loadConfig({
+          ...production,
+          EBAY_ACCOUNT_DELETION_ENDPOINT_URL: `${ENDPOINT}${suffix}`,
+          EBAY_ACCOUNT_DELETION_VERIFICATION_TOKEN: TOKEN,
+        }),
+      ).toThrow(ConfigurationError);
+    }
+  });
+
+  it.each([
+    ['too short', 'a'.repeat(31)],
+    ['too long', 'a'.repeat(81)],
+    ['containing a space', `${'a'.repeat(31)} `],
+    ['containing punctuation', `${'a'.repeat(31)}!`],
+    ['containing a slash', `${'a'.repeat(31)}/`],
+  ])('rejects a verification token that is %s', (_label, token) => {
+    expect(() =>
+      loadConfig({
+        ...production,
+        EBAY_ACCOUNT_DELETION_ENDPOINT_URL: ENDPOINT,
+        EBAY_ACCOUNT_DELETION_VERIFICATION_TOKEN: token,
+      }),
+    ).toThrow(ConfigurationError);
+  });
+
+  it.each([
+    ['exactly 32 characters', 'a'.repeat(32)],
+    ['exactly 80 characters', 'a'.repeat(80)],
+    ['hyphens and underscores', `token_with-mixed_CHARS-${'0'.repeat(12)}`],
+    ['48 hexadecimal characters, as provisioning generates', '0123456789abcdef'.repeat(3)],
+  ])('accepts a verification token with %s', (_label, token) => {
+    expect(
+      loadConfig({
+        ...production,
+        EBAY_ACCOUNT_DELETION_ENDPOINT_URL: ENDPOINT,
+        EBAY_ACCOUNT_DELETION_VERIFICATION_TOKEN: token,
+      }).ebay.accountDeletion?.verificationToken,
+    ).toBe(token);
+  });
+
+  it('never includes the verification token in a validation failure', () => {
+    const token = `${'a'.repeat(40)}!!`;
+    try {
+      loadConfig({
+        ...production,
+        EBAY_ACCOUNT_DELETION_ENDPOINT_URL: ENDPOINT,
+        EBAY_ACCOUNT_DELETION_VERIFICATION_TOKEN: token,
+      });
+      expect.unreachable('expected a rejection');
+    } catch (error) {
+      const serialised = JSON.stringify(error, Object.getOwnPropertyNames(error));
+      expect(serialised).not.toContain(token);
+      expect(serialised).toContain('EBAY_ACCOUNT_DELETION_VERIFICATION_TOKEN');
+    }
+  });
+});

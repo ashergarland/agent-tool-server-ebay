@@ -78,6 +78,28 @@ export const envSchema = z.object({
     .regex(/^\d{1,20}$/)
     .optional(),
 
+  /**
+   * Marketplace Account Deletion/Closure compliance. Both values must be present before the
+   * public callback route is mounted, because eBay's endpoint-validation challenge hashes the
+   * verification token together with the *exact* URL registered in the developer portal.
+   *
+   * The URL is ordinary configuration; the token is a secret and is never surfaced by `/version`,
+   * `/tools` or the OpenAPI document.
+   */
+  EBAY_ACCOUNT_DELETION_ENDPOINT_URL: z.url().optional(),
+  /**
+   * eBay documents the allowed token as 32–80 characters drawn from alphanumerics, underscore
+   * and hyphen. Anything else is rejected by the developer portal, so it is rejected here too
+   * rather than failing halfway through registration.
+   */
+  EBAY_ACCOUNT_DELETION_VERIFICATION_TOKEN: z
+    .string()
+    .regex(
+      /^[A-Za-z0-9_-]{32,80}$/,
+      'must be 32-80 characters using only letters, digits, underscore and hyphen',
+    )
+    .optional(),
+
   // Result-size guardrails applied to every search-shaped tool.
   EBAY_SEARCH_DEFAULT_LIMIT: z.coerce.number().int().min(1).max(200).default(20),
   EBAY_SEARCH_MAX_LIMIT: z.coerce.number().int().min(1).max(200).default(50),
@@ -85,6 +107,17 @@ export const envSchema = z.object({
 });
 
 export type Env = z.infer<typeof envSchema>;
+
+export interface EbayAccountDeletionConfig {
+  /**
+   * The externally advertised callback URL, byte-for-byte as entered in the eBay developer
+   * portal. eBay hashes this exact string, so a trailing slash or a differing host makes the
+   * challenge response wrong.
+   */
+  readonly endpointUrl: string;
+  /** Secret shared with eBay. Never logged, never serialised into a response. */
+  readonly verificationToken: string;
+}
 
 export interface AppConfig {
   readonly env: Env['NODE_ENV'];
@@ -121,6 +154,12 @@ export interface AppConfig {
     readonly deliveryCountry: string | undefined;
     readonly deliveryPostalCode: string | undefined;
     readonly affiliateCampaignId: string | undefined;
+    /**
+     * Present only when both the callback URL and the verification token are configured. When it
+     * is undefined the Marketplace Account Deletion route is not mounted at all, so an
+     * incompletely configured deployment cannot answer eBay's challenge with a wrong hash.
+     */
+    readonly accountDeletion: EbayAccountDeletionConfig | undefined;
   };
   readonly limits: {
     readonly searchDefaultLimit: number;
@@ -160,6 +199,44 @@ const buildAuthConfig = (env: Env): AppConfig['auth'] => {
       }
       return { mode: 'api-key', apiKeys: env.API_KEYS };
   }
+};
+
+const buildAccountDeletionConfig = (env: Env): EbayAccountDeletionConfig | undefined => {
+  const endpointUrl = env.EBAY_ACCOUNT_DELETION_ENDPOINT_URL;
+  const verificationToken = env.EBAY_ACCOUNT_DELETION_VERIFICATION_TOKEN;
+
+  if (endpointUrl === undefined) return undefined;
+
+  let parsed: URL;
+  try {
+    parsed = new URL(endpointUrl);
+  } catch {
+    throw new ConfigurationError('EBAY_ACCOUNT_DELETION_ENDPOINT_URL must be an absolute URL');
+  }
+
+  if (env.NODE_ENV === 'production' && parsed.protocol !== 'https:') {
+    throw new ConfigurationError(
+      'EBAY_ACCOUNT_DELETION_ENDPOINT_URL must use https when NODE_ENV=production; eBay only accepts an HTTPS callback',
+    );
+  }
+  if (parsed.protocol !== 'https:' && parsed.protocol !== 'http:') {
+    throw new ConfigurationError('EBAY_ACCOUNT_DELETION_ENDPOINT_URL must use http or https');
+  }
+  // eBay hashes the registered URL verbatim, and the portal does not accept a query string or a
+  // fragment. Rejecting them here turns a silent challenge mismatch into a startup failure.
+  if (parsed.search !== '' || parsed.hash !== '') {
+    throw new ConfigurationError(
+      'EBAY_ACCOUNT_DELETION_ENDPOINT_URL must not contain a query string or fragment',
+    );
+  }
+
+  if (verificationToken === undefined) {
+    throw new ConfigurationError(
+      'EBAY_ACCOUNT_DELETION_ENDPOINT_URL requires EBAY_ACCOUNT_DELETION_VERIFICATION_TOKEN to be set as well',
+    );
+  }
+
+  return { endpointUrl, verificationToken };
 };
 
 const buildEbayConfig = (env: Env): AppConfig['ebay'] => {
@@ -203,6 +280,7 @@ const buildEbayConfig = (env: Env): AppConfig['ebay'] => {
     deliveryCountry: env.EBAY_DELIVERY_COUNTRY,
     deliveryPostalCode: env.EBAY_DELIVERY_POSTAL_CODE,
     affiliateCampaignId: env.EBAY_AFFILIATE_CAMPAIGN_ID,
+    accountDeletion: buildAccountDeletionConfig(env),
   };
 };
 

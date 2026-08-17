@@ -56,7 +56,10 @@ jobs:
         run: npm run metadata:validate
 
       - name: Validate shell syntax
-        run: bash -n scripts/bootstrap/*.sh
+        run: bash -n scripts/*.sh scripts/bootstrap/*.sh
+
+      - name: Verify deployment parameter resolution
+        run: ./scripts/verify-parameter-resolution.sh
 
       - name: Upload OpenAPI document
         uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4.6.2
@@ -85,11 +88,17 @@ jobs:
       - name: Smoke test the image
         env:
           API_KEY: ci-smoke-test-key-that-is-long-enough
+          # Not a real credential: a throwaway value that satisfies eBay's documented 32-80
+          # character alphanumeric/underscore/hyphen rule so the callback route mounts.
+          DELETION_TOKEN: ci-smoke-test-verification-token-000000
+          DELETION_ENDPOINT: https://connector.ci.invalid/ebay/notifications/marketplace-account-deletion
         run: |
           docker run -d --name connector -p 8080:8080 \
             -e API_KEYS="$API_KEY" \
             -e EBAY_CLIENT_ID=ci-placeholder-client-id \
             -e EBAY_CLIENT_SECRET=ci-placeholder-client-secret \
+            -e EBAY_ACCOUNT_DELETION_ENDPOINT_URL="$DELETION_ENDPOINT" \
+            -e EBAY_ACCOUNT_DELETION_VERIFICATION_TOKEN="$DELETION_TOKEN" \
             agent-tool-server-ebay:ci
           trap 'docker logs connector; docker rm -f connector' EXIT
           for _ in $(seq 1 20); do
@@ -103,6 +112,24 @@ jobs:
           test "$(curl -s -o /dev/null -w '%{http_code}' http://localhost:8080/tools)" = "401"
           test "$(curl -s -o /dev/null -w '%{http_code}' -X POST http://localhost:8080/mcp)" = "401"
           test "$(docker inspect --format '{{.Config.User}}' connector)" = "node"
+
+          # eBay's endpoint-validation challenge, computed independently of the connector.
+          CHALLENGE=ci-challenge-code
+          EXPECTED="$(printf '%s' "${CHALLENGE}${DELETION_TOKEN}${DELETION_ENDPOINT}" \
+            | openssl dgst -sha256 -hex | awk '{print $NF}')"
+          ACTUAL="$(curl -fsS \
+            "http://localhost:8080/ebay/notifications/marketplace-account-deletion?challenge_code=${CHALLENGE}" \
+            | jq -r .challengeResponse)"
+          test "$ACTUAL" = "$EXPECTED"
+
+          # The callback is public by design, but an unsigned notification must never be accepted.
+          test "$(curl -s -o /dev/null -w '%{http_code}' \
+            -X POST -H 'content-type: application/json' -d '{}' \
+            http://localhost:8080/ebay/notifications/marketplace-account-deletion)" = "400"
+
+          # No connector secret may appear in the container's diagnostics.
+          ! curl -fsS http://localhost:8080/version | grep -q "$DELETION_TOKEN"
+          ! docker logs connector 2>&1 | grep -q "$DELETION_TOKEN"
 
   infra:
     name: Validate Bicep

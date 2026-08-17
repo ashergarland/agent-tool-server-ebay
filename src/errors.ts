@@ -8,6 +8,7 @@ export type ErrorCode =
   | 'forbidden'
   | 'not_found'
   | 'conflict'
+  | 'precondition_failed'
   | 'rate_limited'
   | 'upstream_error'
   | 'timeout'
@@ -19,6 +20,8 @@ const statusByCode: Record<ErrorCode, number> = {
   forbidden: 403,
   not_found: 404,
   conflict: 409,
+  /** eBay's documented response for a notification whose signature does not verify. */
+  precondition_failed: 412,
   rate_limited: 429,
   upstream_error: 502,
   timeout: 504,
