@@ -4,6 +4,7 @@ import type { Logger } from 'pino';
 import { createToolRegistry } from '../../src/tools/registry.js';
 import { toolDefinitions, type ToolDefinition } from '../../src/tools/definitions.js';
 import { createServices } from '../../src/services/index.js';
+import { ItemGroupError } from '../../src/errors.js';
 import type { SearchInput } from '../../src/provider/types.js';
 import { testConfig } from '../helpers/config.js';
 import { createFakeProvider, createTestLogger } from '../helpers/fake-provider.js';
@@ -162,6 +163,97 @@ describe('tool invocation', () => {
       .object({ listing: z.object({ itemId: z.string(), active: z.boolean() }) })
       .parse(result);
     expect(parsed.listing.itemId).toBe('v1|407111131587|0');
+  });
+
+  it('keeps the existing listing payload shape for an ordinary listing', async () => {
+    const { services } = buildServices();
+    const result = (await registry.invoke(
+      'ebay_get_listing',
+      { item: 'https://www.ebay.com/itm/407111131587' },
+      services,
+      context,
+    )) as Record<string, unknown>;
+
+    // Backward compatibility: `listing` and `reference` are still populated exactly as before,
+    // with `kind` added alongside them rather than replacing anything.
+    expect(result['kind']).toBe('listing');
+    expect(result['itemGroup']).toBeUndefined();
+    expect(result['listing']).toMatchObject({
+      itemId: 'v1|407111131587|0',
+      legacyItemId: '407111131587',
+      title: 'Sony PlayStation 2 Slim Console SCPH-70012 Charcoal Black',
+    });
+    expect(result['reference']).toMatchObject({
+      legacyItemId: '407111131587',
+      marketplaceId: 'EBAY_US',
+      sourceUrl: 'https://www.ebay.com/itm/407111131587',
+    });
+  });
+
+  it('reports an item group parent as a group with all of its variations', async () => {
+    const provider = createFakeProvider({
+      listing: () => {
+        throw new ItemGroupError('142373490668');
+      },
+    });
+    const services = createServices(
+      testConfig(),
+      provider,
+      createTestLogger() as unknown as Logger,
+    );
+
+    const result = (await registry.invoke(
+      'ebay_get_listing',
+      { item: 'https://www.ebay.com/itm/142373490668' },
+      services,
+      context,
+    )) as Record<string, unknown>;
+
+    expect(() => registry.get('ebay_get_listing').outputSchema.parse(result)).not.toThrow();
+    expect(result['kind']).toBe('itemGroup');
+    expect(result['listing']).toBeUndefined();
+    expect(result['itemGroup']).toMatchObject({
+      itemGroupId: '142373490668',
+      itemGroupType: 'SELLER_DEFINED_VARIATIONS',
+      varyingAspects: ['Colour'],
+    });
+  });
+
+  it('returns an item group that matches its declared output schema', async () => {
+    const { services } = buildServices();
+    const result = await registry.invoke(
+      'ebay_get_item_group',
+      { itemGroup: '142373490668' },
+      services,
+      context,
+    );
+
+    const tool = registry.get('ebay_get_item_group');
+    expect(() => tool.outputSchema.parse(result)).not.toThrow();
+
+    const parsed = z
+      .object({
+        itemGroup: z.object({
+          itemGroupId: z.string(),
+          items: z.array(
+            z.object({
+              itemId: z.string(),
+              itemSpecifics: z.array(z.object({ name: z.string() })),
+            }),
+          ),
+        }),
+      })
+      .parse(result);
+    expect(parsed.itemGroup.itemGroupId).toBe('142373490668');
+    expect(parsed.itemGroup.items).toHaveLength(2);
+    expect(parsed.itemGroup.items[0]?.itemId).toBe('v1|142373490668|623456789012');
+  });
+
+  it('rejects an item group reference that carries no group id', async () => {
+    const { services } = buildServices();
+    await expect(
+      registry.invoke('ebay_get_item_group', { itemGroup: 'nintendo 64' }, services, context),
+    ).rejects.toThrowError(expect.objectContaining({ code: 'bad_request' }) as unknown);
   });
 
   it('returns search results that match the declared output schema', async () => {

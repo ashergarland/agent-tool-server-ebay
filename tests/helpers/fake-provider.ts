@@ -1,7 +1,10 @@
 import { vi } from 'vitest';
 import type {
   EbayProvider,
+  GetItemGroupInput,
   GetListingInput,
+  ItemGroup,
+  ItemGroupVariation,
   Listing,
   ListingSummary,
   SearchInput,
@@ -10,11 +13,14 @@ import type {
 
 export const LEGACY_ID = '407111131587';
 export const BROWSE_ID = `v1|${LEGACY_ID}|0`;
+export const GROUP_ID = '142373490668';
 
 /** A fully populated listing, used as the base for every fake provider response. */
 export const makeListing = (overrides: Partial<Listing> = {}): Listing => ({
   itemId: BROWSE_ID,
   legacyItemId: LEGACY_ID,
+  itemGroupId: undefined,
+  itemGroupType: undefined,
   title: 'Sony PlayStation 2 Slim Console SCPH-70012 Charcoal Black',
   subtitle: undefined,
   shortDescription: undefined,
@@ -130,6 +136,8 @@ export const makeListing = (overrides: Partial<Listing> = {}): Listing => ({
 export const makeSummary = (overrides: Partial<ListingSummary> = {}): ListingSummary => ({
   itemId: 'v1|123456789012|0',
   legacyItemId: '123456789012',
+  itemGroupId: undefined,
+  itemGroupType: undefined,
   title: 'Sony PlayStation 2 Slim Console',
   itemWebUrl: 'https://www.ebay.com/itm/123456789012',
   itemAffiliateWebUrl: undefined,
@@ -173,12 +181,74 @@ export interface RecordedCall {
   readonly args: readonly unknown[];
 }
 
+/** One variation of a fake multi-variation listing. */
+export const makeVariation = (overrides: Partial<ItemGroupVariation> = {}): ItemGroupVariation => ({
+  itemId: `v1|${GROUP_ID}|623456789012`,
+  legacyItemId: GROUP_ID,
+  title: 'Nintendo 64 Console — Charcoal',
+  itemWebUrl: `https://www.ebay.com/itm/${GROUP_ID}`,
+  price: { value: 129.99, currency: 'USD' },
+  currentBidPrice: undefined,
+  buyingOptions: ['FIXED_PRICE'],
+  condition: 'Used',
+  conditionId: '3000',
+  itemSpecifics: [
+    { name: 'Brand', value: 'Nintendo' },
+    { name: 'Colour', value: 'Charcoal' },
+  ],
+  availability: {
+    status: 'IN_STOCK',
+    availableQuantity: 2,
+    soldQuantity: 4,
+    threshold: undefined,
+    thresholdType: undefined,
+    deliveryOptions: ['SHIP_TO_HOME'],
+  },
+  availabilityStatus: 'IN_STOCK',
+  active: true,
+  seller: {
+    username: 'retro_seller',
+    feedbackPercentage: 99.4,
+    feedbackScore: 1523,
+    sellerAccountType: 'BUSINESS',
+  },
+  shippingOptions: [],
+  lowestShippingCost: { value: 9.99, currency: 'USD' },
+  estimatedDeliveredTotal: { value: 139.98, currency: 'USD' },
+  imageUrl: 'https://i.ebayimg.com/images/g/n64/s-l1600.jpg',
+  ...overrides,
+});
+
+export const makeItemGroup = (overrides: Partial<ItemGroup> = {}): ItemGroup => ({
+  itemGroupId: GROUP_ID,
+  itemGroupType: 'SELLER_DEFINED_VARIATIONS',
+  title: 'Nintendo 64 Console — choose your colour',
+  imageUrl: 'https://i.ebayimg.com/images/g/n64group/s-l1600.jpg',
+  marketplaceId: 'EBAY_US',
+  items: [
+    makeVariation(),
+    makeVariation({
+      itemId: `v1|${GROUP_ID}|623456789013`,
+      title: 'Nintendo 64 Console — Blue',
+      price: { value: 149.99, currency: 'USD' },
+      itemSpecifics: [
+        { name: 'Brand', value: 'Nintendo' },
+        { name: 'Colour', value: 'Blue' },
+      ],
+    }),
+  ],
+  varyingAspects: ['Colour'],
+  warnings: [],
+  ...overrides,
+});
+
 export interface FakeProvider extends EbayProvider {
   readonly calls: RecordedCall[];
 }
 
 export interface FakeProviderOptions {
   readonly listing?: Listing | ((input: GetListingInput) => Listing);
+  readonly itemGroup?: ItemGroup | ((input: GetItemGroupInput) => ItemGroup);
   readonly search?: Partial<SearchResult> | ((input: SearchInput) => Partial<SearchResult>);
 }
 
@@ -198,6 +268,18 @@ export const createFakeProvider = (options: FakeProviderOptions = {}): FakeProvi
           ? options.listing(input)
           : (options.listing ?? makeListing({ marketplaceId: input.marketplaceId }));
       return Promise.resolve(listing);
+    },
+    getItemGroup(input: GetItemGroupInput): Promise<ItemGroup> {
+      calls.push({ name: 'getItemGroup', args: [input] });
+      const itemGroup =
+        typeof options.itemGroup === 'function'
+          ? options.itemGroup(input)
+          : (options.itemGroup ??
+            makeItemGroup({
+              marketplaceId: input.marketplaceId,
+              itemGroupId: input.itemGroupId,
+            }));
+      return Promise.resolve(itemGroup);
     },
     searchListings(input: SearchInput): Promise<SearchResult> {
       calls.push({ name: 'searchListings', args: [input] });

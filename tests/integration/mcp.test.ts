@@ -145,8 +145,31 @@ describe('MCP transport', () => {
     });
 
     expect(result.isError).toBeFalsy();
-    const structured = result.structuredContent as { listing: { legacyItemId: string } };
+    const structured = result.structuredContent as {
+      kind: string;
+      listing: { legacyItemId: string };
+    };
+    expect(structured.kind).toBe('listing');
     expect(structured.listing.legacyItemId).toBe('407111131587');
+
+    await server.close();
+    await client.close();
+  });
+
+  it('returns every variation of an item group as structured content', async () => {
+    const { client, server } = await connect();
+
+    const result = await client.callTool({
+      name: 'ebay_get_item_group',
+      arguments: { itemGroup: 'https://www.ebay.com/itm/142373490668' },
+    });
+
+    expect(result.isError).toBeFalsy();
+    const structured = result.structuredContent as {
+      itemGroup: { itemGroupId: string; items: { itemId: string }[] };
+    };
+    expect(structured.itemGroup.itemGroupId).toBe('142373490668');
+    expect(structured.itemGroup.items).toHaveLength(2);
 
     await server.close();
     await client.close();

@@ -82,6 +82,10 @@ export interface ProductIdentifiers {
 export interface Listing {
   readonly itemId: string;
   readonly legacyItemId: string | undefined;
+  /** Parent item group id when this listing is one variation of a multi-variation group. */
+  readonly itemGroupId: string | undefined;
+  /** eBay's item group type, currently only `SELLER_DEFINED_VARIATIONS`. */
+  readonly itemGroupType: string | undefined;
   readonly title: string;
   readonly subtitle: string | undefined;
   readonly shortDescription: string | undefined;
@@ -153,6 +157,14 @@ export interface Listing {
 export interface ListingSummary {
   readonly itemId: string;
   readonly legacyItemId: string | undefined;
+  /**
+   * Item group id, present when this row is a multi-variation listing. Such a row describes a
+   * group of purchasable variations, so it must be followed up with `getItemGroup` rather than
+   * treated as one buyable item.
+   */
+  readonly itemGroupId: string | undefined;
+  /** eBay's item group type (currently only `SELLER_DEFINED_VARIATIONS`); absent for single items. */
+  readonly itemGroupType: string | undefined;
   readonly title: string;
   readonly itemWebUrl: string | undefined;
   readonly itemAffiliateWebUrl: string | undefined;
@@ -233,10 +245,58 @@ export interface GetListingInput {
 }
 
 /**
+ * One purchasable variation of a multi-variation listing. This is a projection of {@link Listing}:
+ * the fields a buyer needs to tell variations apart and pick one, without repeating the group-wide
+ * data on every row.
+ */
+export interface ItemGroupVariation {
+  /** RESTful Browse item id (`v1|<groupId>|<variationId>`), usable directly with getItem. */
+  readonly itemId: string;
+  readonly legacyItemId: string | undefined;
+  readonly title: string;
+  readonly itemWebUrl: string | undefined;
+  readonly price: Money | undefined;
+  readonly currentBidPrice: Money | undefined;
+  readonly buyingOptions: readonly BuyingOption[];
+  readonly condition: string | undefined;
+  readonly conditionId: string | undefined;
+  /** The item specifics eBay returned for this variation, e.g. Colour: Blue, Size: XL. */
+  readonly itemSpecifics: readonly ItemAspect[];
+  readonly availability: Availability | undefined;
+  readonly availabilityStatus: string | undefined;
+  readonly active: boolean;
+  readonly seller: SellerInfo;
+  readonly shippingOptions: readonly ShippingOption[];
+  readonly lowestShippingCost: Money | undefined;
+  readonly estimatedDeliveredTotal: Money | undefined;
+  readonly imageUrl: string | undefined;
+}
+
+/** A multi-variation eBay listing as returned by `getItemsByItemGroup`. */
+export interface ItemGroup {
+  readonly itemGroupId: string;
+  readonly itemGroupType: string | undefined;
+  readonly title: string | undefined;
+  readonly imageUrl: string | undefined;
+  readonly marketplaceId: MarketplaceId;
+  /** Every individually purchasable item in the group, in the order eBay returned them. */
+  readonly items: readonly ItemGroupVariation[];
+  /** Item specific names whose values differ between variations, e.g. ['Colour', 'Size']. */
+  readonly varyingAspects: readonly string[];
+  readonly warnings: readonly string[];
+}
+
+export interface GetItemGroupInput {
+  readonly marketplaceId: MarketplaceId;
+  readonly itemGroupId: string;
+}
+
+/**
  * The eBay port. Everything a service needs from eBay is expressed here; no other layer imports
  * anything from `provider/ebay`.
  */
 export interface EbayProvider {
   getListing(input: GetListingInput): Promise<Listing>;
+  getItemGroup(input: GetItemGroupInput): Promise<ItemGroup>;
   searchListings(input: SearchInput): Promise<SearchResult>;
 }

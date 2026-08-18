@@ -1,7 +1,9 @@
 import { describe, expect, it } from 'vitest';
 import {
   isLegacyItemId,
+  itemGroupIdFromHref,
   parseBrowseItemId,
+  parseItemGroupReference,
   parseItemReference,
   resolveMarketplace,
   toBrowseItemId,
@@ -9,6 +11,7 @@ import {
 import { marketplaceForHost } from '../../src/provider/ebay/marketplaces.js';
 
 const ID = '407111131587';
+const GROUP_ID = '142373490668';
 
 const expectBadRequest = (input: string): void => {
   expect(() => parseItemReference(input)).toThrowError(
@@ -38,6 +41,15 @@ describe('parseItemReference — bare identifiers', () => {
       legacyItemId: ID,
       legacyVariationId: undefined,
     });
+  });
+
+  it('records that a Browse item id was supplied explicitly', () => {
+    expect(parseItemReference(`v1|${ID}|0`).browseItemIdSupplied).toBe(true);
+  });
+
+  it('does not claim a Browse item id was supplied for a legacy id or URL', () => {
+    expect(parseItemReference(ID).browseItemIdSupplied).toBe(false);
+    expect(parseItemReference(`https://www.ebay.com/itm/${ID}`).browseItemIdSupplied).toBe(false);
   });
 
   it('preserves a real variation id from a Browse item id', () => {
@@ -251,6 +263,65 @@ describe('parseItemReference — invalid input', () => {
 
   it('rejects an eBay search URL even though it contains digits', () => {
     expectBadRequest('https://www.ebay.com/b/Video-Games/139973');
+  });
+});
+
+describe('parseItemGroupReference', () => {
+  const expectBadGroupRequest = (input: unknown): void => {
+    expect(() => parseItemGroupReference(input)).toThrowError(
+      expect.objectContaining({ code: 'bad_request' }) as unknown,
+    );
+  };
+
+  it('accepts a bare numeric item group id', () => {
+    expect(parseItemGroupReference(GROUP_ID)).toMatchObject({
+      itemGroupId: GROUP_ID,
+      marketplaceId: undefined,
+    });
+  });
+
+  it('accepts the parent listing URL and infers its marketplace', () => {
+    expect(parseItemGroupReference(`https://www.ebay.co.uk/itm/${GROUP_ID}`)).toMatchObject({
+      itemGroupId: GROUP_ID,
+      marketplaceId: 'EBAY_GB',
+      sourceUrl: `https://www.ebay.co.uk/itm/${GROUP_ID}`,
+    });
+  });
+
+  it("takes the group id from a variation's Browse item id", () => {
+    expect(parseItemGroupReference(`v1|${GROUP_ID}|623456789012`).itemGroupId).toBe(GROUP_ID);
+  });
+
+  it("accepts eBay's own itemGroupHref", () => {
+    const href = `https://api.ebay.com/buy/browse/v1/item/get_items_by_item_group?item_group_id=${GROUP_ID}`;
+    expect(parseItemGroupReference(href)).toMatchObject({
+      itemGroupId: GROUP_ID,
+      marketplaceId: undefined,
+    });
+  });
+
+  it('rejects input that carries no group id', () => {
+    expectBadGroupRequest('https://www.ebay.com/sch/i.html?_nkw=nintendo+64');
+    expectBadGroupRequest('12345');
+    expectBadGroupRequest('');
+    expectBadGroupRequest(undefined);
+  });
+});
+
+describe('itemGroupIdFromHref', () => {
+  it('extracts the item_group_id query parameter', () => {
+    expect(
+      itemGroupIdFromHref(
+        `https://api.ebay.com/buy/browse/v1/item/get_items_by_item_group?item_group_id=${GROUP_ID}`,
+      ),
+    ).toBe(GROUP_ID);
+  });
+
+  it('returns undefined for anything else', () => {
+    expect(
+      itemGroupIdFromHref('https://api.ebay.com/buy/browse/v1/item/v1%7C1%7C0'),
+    ).toBeUndefined();
+    expect(itemGroupIdFromHref(undefined)).toBeUndefined();
   });
 });
 

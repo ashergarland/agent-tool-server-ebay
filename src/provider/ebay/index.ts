@@ -1,14 +1,17 @@
 import type { AppConfig } from '../../config/index.js';
-import { AppError, badRequest } from '../../errors.js';
+import { AppError, badRequest, isItemGroupError } from '../../errors.js';
 import type {
   EbayProvider,
+  GetItemGroupInput,
   GetListingInput,
+  ItemGroup,
   Listing,
   SearchInput,
   SearchResult,
 } from '../types.js';
 import { buildSearchFilter, toEbaySort } from './filters.js';
 import {
+  normaliseItemGroup,
   normaliseListing,
   normaliseListingSummary,
   normaliseTotal,
@@ -16,6 +19,7 @@ import {
 } from './normalize.js';
 import { EbayTokenProvider, type FetchLike } from './oauth.js';
 import { EbayRestClient } from './rest.js';
+import { parseBrowseItemId } from './urls.js';
 
 export { EbayTokenProvider, EbayRestClient };
 export * from './marketplaces.js';
@@ -26,12 +30,19 @@ export {
   addMoney,
   deliveredTotal,
   lowestShippingCost,
+  normaliseItemGroup,
   normaliseListing,
   normaliseListingSummary,
   secondsUntil,
   toMoney,
 } from './normalize.js';
-export { describeEbayErrors, mapEbayHttpError, mapEbayTransportError } from './errors.js';
+export {
+  describeEbayErrors,
+  isItemGroupErrorBody,
+  itemGroupIdFromErrorBody,
+  mapEbayHttpError,
+  mapEbayTransportError,
+} from './errors.js';
 
 /** Ask eBay for the catalogue product container so EPID/MPN/GTIN are available for comparables. */
 const GET_ITEM_FIELDGROUPS = 'PRODUCT';
@@ -50,15 +61,31 @@ export class BrowseApiProvider implements EbayProvider {
   public constructor(private readonly client: EbayRestClient) {}
 
   public async getListing(input: GetListingInput): Promise<Listing> {
-    const payload = input.itemId
-      ? await this.client.get<unknown>(`/buy/browse/v1/item/${encodeURIComponent(input.itemId)}`, {
-          marketplaceId: input.marketplaceId,
-          query: { fieldgroups: GET_ITEM_FIELDGROUPS },
-          context: 'getListing',
-        })
-      : await this.getByLegacyId(input);
+    try {
+      const payload = input.itemId
+        ? await this.client.get<unknown>(
+            `/buy/browse/v1/item/${encodeURIComponent(input.itemId)}`,
+            {
+              marketplaceId: input.marketplaceId,
+              query: { fieldgroups: GET_ITEM_FIELDGROUPS },
+              context: 'getListing',
+            },
+          )
+        : await this.getByLegacyId(input);
 
-    return normaliseListing(payload, { marketplaceId: input.marketplaceId });
+      return normaliseListing(payload, { marketplaceId: input.marketplaceId });
+    } catch (error) {
+      // eBay names the group in its error, but not always; the id we asked with is the group id.
+      if (isItemGroupError(error)) {
+        throw error.withItemGroupId(
+          input.legacyItemId ??
+            (input.itemId === undefined
+              ? undefined
+              : parseBrowseItemId(input.itemId)?.legacyItemId),
+        );
+      }
+      throw error;
+    }
   }
 
   private getByLegacyId(input: GetListingInput): Promise<unknown> {
@@ -73,6 +100,24 @@ export class BrowseApiProvider implements EbayProvider {
         fieldgroups: GET_ITEM_FIELDGROUPS,
       },
       context: 'getListing',
+    });
+  }
+
+  /**
+   * Retrieves every individually purchasable item in a multi-variation listing. eBay documents
+   * this as the only correct way to read a variation group: `getItem` and `getItemByLegacyId`
+   * address single items, and a group id is neither.
+   */
+  public async getItemGroup(input: GetItemGroupInput): Promise<ItemGroup> {
+    const payload = await this.client.get<unknown>('/buy/browse/v1/item/get_items_by_item_group', {
+      marketplaceId: input.marketplaceId,
+      query: { item_group_id: input.itemGroupId },
+      context: 'getItemGroup',
+    });
+
+    return normaliseItemGroup(payload, {
+      marketplaceId: input.marketplaceId,
+      itemGroupId: input.itemGroupId,
     });
   }
 

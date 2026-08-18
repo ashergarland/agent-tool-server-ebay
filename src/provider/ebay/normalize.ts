@@ -2,6 +2,8 @@ import type {
   Availability,
   BuyingOption,
   ItemAspect,
+  ItemGroup,
+  ItemGroupVariation,
   Listing,
   ListingSummary,
   LocationInfo,
@@ -12,7 +14,7 @@ import type {
   SellerInfo,
   ShippingOption,
 } from '../types.js';
-import { toBrowseItemId } from './urls.js';
+import { itemGroupIdFromHref, toBrowseItemId } from './urls.js';
 
 /**
  * Normalisation of eBay Browse API payloads into the connector's domain model.
@@ -270,6 +272,24 @@ export interface NormaliseOptions {
   readonly nowMs?: number;
 }
 
+/**
+ * eBay describes an item's parent variation group in `primaryItemGroup` on an `Item`, and with a
+ * bare `itemGroupHref`/`itemGroupType` pair on an `ItemSummary`. Both are reduced to the group id
+ * and type, which is what a caller needs to route a follow-up call.
+ */
+const toItemGroupSummary = (
+  item: Json,
+): { itemGroupId: string | undefined; itemGroupType: string | undefined } => {
+  const group = asObject(item['primaryItemGroup']);
+  return {
+    itemGroupId:
+      str(group?.['itemGroupId']) ??
+      itemGroupIdFromHref(group?.['itemGroupHref']) ??
+      itemGroupIdFromHref(item['itemGroupHref']),
+    itemGroupType: str(group?.['itemGroupType']) ?? str(item['itemGroupType']),
+  };
+};
+
 /** Normalises a Browse API `Item` (the `getItem` / `getItemByLegacyId` response). */
 export const normaliseListing = (payload: unknown, options: NormaliseOptions): Listing => {
   const item = asObject(payload) ?? {};
@@ -290,10 +310,13 @@ export const normaliseListing = (payload: unknown, options: NormaliseOptions): L
   const { ended, active } = isActive(secondsRemaining, availability?.status);
 
   const marketingPrice = asObject(item['marketingPrice']);
+  const itemGroup = toItemGroupSummary(item);
 
   return {
     itemId,
     legacyItemId,
+    itemGroupId: itemGroup.itemGroupId,
+    itemGroupType: itemGroup.itemGroupType,
     title: str(item['title']) ?? '(untitled listing)',
     subtitle: str(item['subtitle']),
     shortDescription: str(item['shortDescription']),
@@ -389,9 +412,13 @@ export const normaliseListingSummary = (
     ...asArray(item['categories']).map((entry) => str(asObject(entry)?.['categoryId'])),
   ].filter((id): id is string => id !== undefined);
 
+  const itemGroup = toItemGroupSummary(item);
+
   return {
     itemId,
     legacyItemId,
+    itemGroupId: itemGroup.itemGroupId,
+    itemGroupType: itemGroup.itemGroupType,
     title: str(item['title']) ?? '(untitled listing)',
     itemWebUrl: str(item['itemWebUrl']),
     itemAffiliateWebUrl: str(item['itemAffiliateWebUrl']),
@@ -433,3 +460,87 @@ export const normaliseWarnings = (payload: unknown): readonly string[] =>
 
 export const normaliseTotal = (payload: unknown): number | undefined =>
   int(asObject(payload)?.['total']);
+
+/** eBay caps a variation listing well below this; the bound only protects against a runaway payload. */
+const MAX_GROUP_ITEMS = 200;
+
+/** Projects an already-normalised listing down to the fields that distinguish one variation. */
+const toVariation = (listing: Listing): ItemGroupVariation => ({
+  itemId: listing.itemId,
+  legacyItemId: listing.legacyItemId,
+  title: listing.title,
+  itemWebUrl: listing.itemWebUrl,
+  price: listing.price,
+  currentBidPrice: listing.currentBidPrice,
+  buyingOptions: listing.buyingOptions,
+  condition: listing.condition,
+  conditionId: listing.conditionId,
+  itemSpecifics: listing.itemSpecifics,
+  availability: listing.availability,
+  availabilityStatus: listing.availabilityStatus,
+  active: listing.active,
+  seller: listing.seller,
+  shippingOptions: listing.shippingOptions,
+  lowestShippingCost: listing.lowestShippingCost,
+  estimatedDeliveredTotal: listing.estimatedDeliveredTotal,
+  imageUrl: listing.imageUrl,
+});
+
+/**
+ * The item specific names whose values actually differ across the group — the aspects a buyer
+ * chooses between (colour, size, capacity). Purely derived from the values eBay returned.
+ */
+const varyingAspectNames = (variations: readonly ItemGroupVariation[]): readonly string[] => {
+  if (variations.length < 2) return [];
+  const valuesByName = new Map<string, Set<string>>();
+  for (const variation of variations) {
+    for (const aspect of variation.itemSpecifics) {
+      const values = valuesByName.get(aspect.name) ?? new Set<string>();
+      values.add(aspect.value);
+      valuesByName.set(aspect.name, values);
+    }
+  }
+  return [...valuesByName.entries()].filter(([, values]) => values.size > 1).map(([name]) => name);
+};
+
+export interface NormaliseItemGroupOptions extends NormaliseOptions {
+  /** The group id that was requested, used when eBay's payload does not repeat it. */
+  readonly itemGroupId: string;
+}
+
+/**
+ * Normalises a Browse API `ItemGroup` (the `getItemsByItemGroup` response). Every entry of `items`
+ * is a full `Item`, so each one is normalised with {@link normaliseListing} and then projected:
+ * the group is reported as the set of its individual purchasable variations, never collapsed into
+ * a single representative item.
+ */
+export const normaliseItemGroup = (
+  payload: unknown,
+  options: NormaliseItemGroupOptions,
+): ItemGroup => {
+  const group = asObject(payload) ?? {};
+  const rawItems = asArray(group['items']).slice(0, MAX_GROUP_ITEMS);
+
+  const items = rawItems.map((item) =>
+    toVariation(
+      normaliseListing(item, {
+        marketplaceId: options.marketplaceId,
+        ...(options.nowMs === undefined ? {} : { nowMs: options.nowMs }),
+      }),
+    ),
+  );
+
+  // Group-wide identity lives on each item's `primaryItemGroup` container.
+  const primary = asObject(asObject(rawItems[0])?.['primaryItemGroup']);
+
+  return {
+    itemGroupId: str(primary?.['itemGroupId']) ?? options.itemGroupId,
+    itemGroupType: str(primary?.['itemGroupType']),
+    title: str(primary?.['itemGroupTitle']),
+    imageUrl: toImageUrl(primary?.['itemGroupImage']),
+    marketplaceId: options.marketplaceId,
+    items,
+    varyingAspects: varyingAspectNames(items),
+    warnings: normaliseWarnings(group),
+  };
+};

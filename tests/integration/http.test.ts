@@ -1,8 +1,15 @@
 import { afterAll, beforeAll, describe, expect, it, vi } from 'vitest';
 import type { Logger } from 'pino';
 import { createApplication, type Application } from '../../src/app.js';
+import { ItemGroupError } from '../../src/errors.js';
 import { testConfig } from '../helpers/config.js';
-import { createFakeProvider, createTestLogger, makeListing } from '../helpers/fake-provider.js';
+import {
+  createFakeProvider,
+  createTestLogger,
+  makeListing,
+  makeSummary,
+  GROUP_ID,
+} from '../helpers/fake-provider.js';
 
 const API_KEY = 'test-api-key-that-is-long-enough-000000';
 
@@ -123,10 +130,11 @@ describe('HTTP surface', () => {
     const response = await app.http.inject({ method: 'GET', url: '/tools', headers: auth });
     expect(response.statusCode).toBe(200);
     const body = response.json();
-    expect(body.tools).toHaveLength(4);
+    expect(body.tools).toHaveLength(5);
     expect(body.tools[0]).toHaveProperty('inputSchema.type', 'object');
     expect(body.tools.map((tool: { name: string }) => tool.name)).toEqual([
       'ebay_get_listing',
+      'ebay_get_item_group',
       'ebay_search_listings',
       'ebay_find_similar_listings',
       'ebay_compare_listings',
@@ -339,6 +347,135 @@ describe('ended listings', () => {
 
     expect(response.statusCode).toBe(200);
     expect(response.json().result.listing).toMatchObject({ active: false, ended: true });
+    await app.http.close();
+  });
+});
+
+describe('search to detail handoff', () => {
+  const auth = { authorization: ['Bearer', API_KEY].join(' ') };
+
+  /**
+   * The production regression: search succeeded, but feeding the first row's identifier to
+   * ebay_get_listing failed with eBay error 11006. The identifier a search returns must be usable
+   * with the matching detail tool, unchanged.
+   */
+  it('passes a returned RESTful itemId straight to getItem', async () => {
+    const provider = createFakeProvider({
+      search: { listings: [makeSummary({ itemId: 'v1|407111131587|0' })] },
+    });
+    const app = buildApp({}, provider);
+    await app.http.ready();
+
+    const search = await app.http.inject({
+      method: 'POST',
+      url: '/tools/ebay_search_listings',
+      headers: auth,
+      payload: { query: 'nintendo 64 console' },
+    });
+    expect(search.statusCode).toBe(200);
+    const first = search.json().result.listings[0] as { itemId: string };
+
+    const detail = await app.http.inject({
+      method: 'POST',
+      url: '/tools/ebay_get_listing',
+      headers: auth,
+      payload: { item: first.itemId },
+    });
+
+    expect(detail.statusCode).toBe(200);
+    expect(detail.json().result).toMatchObject({ kind: 'listing' });
+    const call = provider.calls.find((entry) => entry.name === 'getListing');
+    expect(call?.args[0]).toEqual({ marketplaceId: 'EBAY_US', itemId: 'v1|407111131587|0' });
+    await app.http.close();
+  });
+
+  it('carries item group metadata through search and into ebay_get_item_group', async () => {
+    const provider = createFakeProvider({
+      search: {
+        listings: [
+          makeSummary({
+            itemId: `v1|${GROUP_ID}|623456789012`,
+            legacyItemId: GROUP_ID,
+            itemGroupId: GROUP_ID,
+            itemGroupType: 'SELLER_DEFINED_VARIATIONS',
+          }),
+        ],
+      },
+    });
+    const app = buildApp({}, provider);
+    await app.http.ready();
+
+    const search = await app.http.inject({
+      method: 'POST',
+      url: '/tools/ebay_search_listings',
+      headers: auth,
+      payload: { query: 'nintendo 64 console' },
+    });
+    const row = search.json().result.listings[0] as { itemGroupId: string; itemGroupType: string };
+    expect(row.itemGroupType).toBe('SELLER_DEFINED_VARIATIONS');
+
+    const group = await app.http.inject({
+      method: 'POST',
+      url: '/tools/ebay_get_item_group',
+      headers: auth,
+      payload: { itemGroup: row.itemGroupId },
+    });
+
+    expect(group.statusCode).toBe(200);
+    expect(group.json().result.itemGroup).toMatchObject({ itemGroupId: GROUP_ID });
+    expect(group.json().result.itemGroup.items).toHaveLength(2);
+    await app.http.close();
+  });
+
+  it('answers a pasted item group URL with the group instead of an opaque failure', async () => {
+    const provider = createFakeProvider({
+      listing: () => {
+        throw new ItemGroupError(GROUP_ID);
+      },
+    });
+    const app = buildApp({}, provider);
+    await app.http.ready();
+
+    const response = await app.http.inject({
+      method: 'POST',
+      url: '/tools/ebay_get_listing',
+      headers: auth,
+      payload: { item: `https://www.ebay.com/itm/${GROUP_ID}` },
+    });
+
+    expect(response.statusCode).toBe(200);
+    expect(response.json().result).toMatchObject({
+      kind: 'itemGroup',
+      itemGroup: { itemGroupId: GROUP_ID },
+    });
+    await app.http.close();
+  });
+
+  it('returns an actionable error when the group itself cannot be fetched', async () => {
+    const provider = createFakeProvider({
+      listing: () => {
+        throw new ItemGroupError(GROUP_ID);
+      },
+    });
+    const failing = {
+      ...provider,
+      getItemGroup: () => Promise.reject(new ItemGroupError(GROUP_ID)),
+    };
+    const app = buildApp({}, failing);
+    await app.http.ready();
+
+    const response = await app.http.inject({
+      method: 'POST',
+      url: '/tools/ebay_get_listing',
+      headers: auth,
+      payload: { item: `https://www.ebay.com/itm/${GROUP_ID}` },
+    });
+
+    expect(response.statusCode).toBe(400);
+    expect(response.json().error).toMatchObject({
+      code: 'bad_request',
+      details: { reason: 'item_group', itemGroupId: GROUP_ID, useTool: 'ebay_get_item_group' },
+    });
     await app.http.close();
   });
 });

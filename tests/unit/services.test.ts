@@ -1,6 +1,7 @@
 import { describe, expect, it } from 'vitest';
 import type { Logger } from 'pino';
 import { createServices } from '../../src/services/index.js';
+import { AppError, isItemGroupError, ItemGroupError } from '../../src/errors.js';
 import type { GetListingInput, SearchInput } from '../../src/provider/types.js';
 import { testConfig } from '../helpers/config.js';
 import {
@@ -45,10 +46,21 @@ describe('ListingsService.getListing', () => {
     const { provider, services } = build();
     await services.listings.getListing({ item: 'v1|407111131587|0' });
 
-    // A Browse item id carries no legacy id of its own once the sentinel is normalised away,
-    // so the connector still resolves it via the legacy endpoint it was derived from.
-    expect(lastCall(provider, 'getListing')?.args[0]).toMatchObject({
-      legacyItemId: '407111131587',
+    // eBay documents Browse item ids and legacy ids as separate identifier spaces: an explicitly
+    // supplied Browse id must reach GET /item/{item_id} unchanged, never get_item_by_legacy_id.
+    const input = lastCall(provider, 'getListing')?.args[0] as GetListingInput;
+    expect(input.itemId).toBe('v1|407111131587|0');
+    expect(input.legacyItemId).toBeUndefined();
+    expect(input.legacyVariationId).toBeUndefined();
+  });
+
+  it('keeps the variation segment of a supplied Browse item id', async () => {
+    const { provider, services } = build();
+    await services.listings.getListing({ item: 'v1|142373490668|623456789012' });
+
+    expect(lastCall(provider, 'getListing')?.args[0]).toEqual({
+      marketplaceId: 'EBAY_US',
+      itemId: 'v1|142373490668|623456789012',
     });
   });
 
@@ -113,6 +125,187 @@ describe('ListingsService.getListing', () => {
     });
     const result = await services.listings.getListing({ item: '407111131587' });
     expect(result.listing.active).toBe(false);
+  });
+});
+
+/**
+ * Reproduces the production failure end to end at the service boundary: a pasted `/itm/<id>` URL
+ * whose numeric id is really an item group parent. The URL itself cannot reveal that, so the
+ * connector has to act on eBay's structured 11006 answer.
+ */
+describe('ListingsService — legacy ids that turn out to be item groups', () => {
+  const GROUP_ID = '142373490668';
+
+  const buildGroupProvider = (options: FakeProviderOptions = {}) =>
+    build({
+      listing: () => {
+        throw new ItemGroupError(GROUP_ID);
+      },
+      ...options,
+    });
+
+  it('surfaces a specific item-group failure rather than an opaque bad request', async () => {
+    const { services } = buildGroupProvider();
+
+    const error = await services.listings
+      .getListing({ item: `https://www.ebay.com/itm/${GROUP_ID}` })
+      .catch((caught: unknown) => caught);
+
+    expect(isItemGroupError(error)).toBe(true);
+    expect((error as ItemGroupError).details).toMatchObject({
+      reason: 'item_group',
+      itemGroupId: GROUP_ID,
+      useTool: 'ebay_get_item_group',
+    });
+    expect((error as ItemGroupError).message).toContain('ebay_get_item_group');
+  });
+
+  it('resolves the group through getItemsByItemGroup and reports it as a group', async () => {
+    const { provider, services } = buildGroupProvider();
+
+    const resolved = await services.listings.resolveItem({
+      item: `https://www.ebay.com/itm/${GROUP_ID}`,
+    });
+
+    expect(resolved.kind).toBe('itemGroup');
+    if (resolved.kind !== 'itemGroup') expect.unreachable();
+    expect(resolved.itemGroup.itemGroupId).toBe(GROUP_ID);
+    // Every variation is returned; none is promoted to stand for the whole group.
+    expect(resolved.itemGroup.items.length).toBeGreaterThan(1);
+    expect(lastCall(provider, 'getItemGroup')?.args[0]).toEqual({
+      marketplaceId: 'EBAY_US',
+      itemGroupId: GROUP_ID,
+    });
+  });
+
+  it('keeps the marketplace implied by the pasted URL when resolving the group', async () => {
+    const { provider, services } = buildGroupProvider();
+    await services.listings.resolveItem({ item: `https://www.ebay.co.uk/itm/${GROUP_ID}` });
+
+    expect(lastCall(provider, 'getItemGroup')?.args[0]).toMatchObject({
+      marketplaceId: 'EBAY_GB',
+    });
+  });
+
+  it('reports a single listing as a listing', async () => {
+    const { services } = build();
+    const resolved = await services.listings.resolveItem({ item: '407111131587' });
+
+    expect(resolved.kind).toBe('listing');
+    if (resolved.kind !== 'listing') expect.unreachable();
+    expect(resolved.listing.itemId).toBe('v1|407111131587|0');
+  });
+
+  it('rethrows the actionable item-group error when the group lookup itself fails', async () => {
+    const { services } = buildGroupProvider({
+      itemGroup: () => {
+        throw new AppError('upstream_error', 'getItemGroup: eBay returned 503');
+      },
+    });
+
+    await expect(
+      services.listings.resolveItem({ item: `https://www.ebay.com/itm/${GROUP_ID}` }),
+    ).rejects.toMatchObject({ code: 'upstream_error' });
+  });
+
+  it('does not swallow unrelated failures', async () => {
+    const { services } = build({
+      listing: () => {
+        throw new AppError('not_found', 'getListing: The item was not found.');
+      },
+    });
+
+    await expect(services.listings.getListing({ item: '407111131587' })).rejects.toMatchObject({
+      code: 'not_found',
+    });
+  });
+});
+
+describe('ListingsService.getItemGroup', () => {
+  const GROUP_ID = '142373490668';
+
+  it('fetches a bare group id against the configured marketplace', async () => {
+    const { provider, services } = build();
+    const result = await services.listings.getItemGroup({ itemGroup: GROUP_ID });
+
+    expect(lastCall(provider, 'getItemGroup')?.args[0]).toEqual({
+      marketplaceId: 'EBAY_US',
+      itemGroupId: GROUP_ID,
+    });
+    expect(result.itemGroup.items[0]?.itemId).toBe(`v1|${GROUP_ID}|623456789012`);
+    expect(result.reference.itemGroupId).toBe(GROUP_ID);
+  });
+
+  it('accepts the parent listing URL and infers its marketplace', async () => {
+    const { provider, services } = build();
+    await services.listings.getItemGroup({ itemGroup: `https://www.ebay.de/itm/${GROUP_ID}` });
+
+    expect(lastCall(provider, 'getItemGroup')?.args[0]).toMatchObject({
+      marketplaceId: 'EBAY_DE',
+      itemGroupId: GROUP_ID,
+    });
+  });
+
+  it("accepts a variation's Browse item id", async () => {
+    const { provider, services } = build();
+    await services.listings.getItemGroup({ itemGroup: `v1|${GROUP_ID}|623456789013` });
+
+    expect(lastCall(provider, 'getItemGroup')?.args[0]).toMatchObject({ itemGroupId: GROUP_ID });
+  });
+
+  it('rejects an unsupported marketplace before calling eBay', async () => {
+    const { provider, services } = build();
+    await expect(
+      services.listings.getItemGroup({ itemGroup: GROUP_ID, marketplaceId: 'EBAY_IN' }),
+    ).rejects.toMatchObject({ code: 'bad_request' });
+    expect(provider.calls).toHaveLength(0);
+  });
+});
+
+/**
+ * The invariant the production bug broke: an identifier taken from a search result must be usable
+ * with the matching detail tool without any rewriting.
+ */
+describe('search result to detail handoff', () => {
+  it('passes a returned RESTful itemId straight through to getItem', async () => {
+    const { provider, services } = build({
+      search: { listings: [makeSummary({ itemId: 'v1|407111131587|0' })] },
+    });
+
+    const search = await services.listings.searchListings({ query: 'nintendo 64 console' });
+    const first = search.listings[0];
+    expect(first?.itemId).toBe('v1|407111131587|0');
+
+    await services.listings.getListing({ item: first?.itemId ?? '' });
+
+    expect(lastCall(provider, 'getListing')?.args[0]).toEqual({
+      marketplaceId: 'EBAY_US',
+      itemId: 'v1|407111131587|0',
+    });
+  });
+
+  it('routes a search row that is an item group to the item group lookup', async () => {
+    const GROUP_ID = '142373490668';
+    const { provider, services } = build({
+      search: {
+        listings: [
+          makeSummary({
+            itemId: `v1|${GROUP_ID}|623456789012`,
+            legacyItemId: GROUP_ID,
+            itemGroupId: GROUP_ID,
+            itemGroupType: 'SELLER_DEFINED_VARIATIONS',
+          }),
+        ],
+      },
+    });
+
+    const search = await services.listings.searchListings({ query: 'nintendo 64 console' });
+    const row = search.listings[0];
+    expect(row?.itemGroupType).toBe('SELLER_DEFINED_VARIATIONS');
+
+    await services.listings.getItemGroup({ itemGroup: row?.itemGroupId ?? '' });
+
+    expect(lastCall(provider, 'getItemGroup')?.args[0]).toMatchObject({ itemGroupId: GROUP_ID });
   });
 });
 
