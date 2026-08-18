@@ -3,6 +3,7 @@ import { BrowseApiProvider, createEbayProvider } from '../../src/provider/ebay/i
 import { buildEndUserContext, EbayRestClient } from '../../src/provider/ebay/rest.js';
 import { EbayTokenProvider } from '../../src/provider/ebay/oauth.js';
 import { isRetryableStatus, mapEbayHttpError } from '../../src/provider/ebay/errors.js';
+import { isItemGroupError, type ItemGroupError } from '../../src/errors.js';
 import {
   createFakeFetch,
   ebayErrorBody,
@@ -217,8 +218,9 @@ describe('EbayRestClient — error handling', () => {
   });
 
   it('treats an ended-listing 400 as not_found', () => {
+    // 11003 is eBay's "legacy item id not found"; 11006 is reserved for item groups.
     const error = mapEbayHttpError(
-      { status: 400, body: ebayErrorBody(11_006, 'The listing has ended.') },
+      { status: 400, body: ebayErrorBody(11_003, 'The listing has ended.') },
       'getListing',
     );
     expect(error.code).toBe('not_found');
@@ -374,6 +376,196 @@ describe('BrowseApiProvider', () => {
         offset: 0,
       }),
     ).rejects.toMatchObject({ code: 'bad_request' });
+  });
+});
+
+/**
+ * The production failure this suite guards: `ebay_search_listings` returned a row whose legacy id
+ * (142373490668) is an item group parent, and `get_item_by_legacy_id` answered with eBay error
+ * 11006 rather than an item.
+ */
+describe('BrowseApiProvider — item groups', () => {
+  const GROUP_ID = '142373490668';
+
+  /** eBay's real 11006 envelope, with the documented `{itemGroupHref}` parameter. */
+  const itemGroupErrorBody = (extra: Record<string, unknown> = {}): unknown =>
+    ebayErrorBody(
+      11_006,
+      'The legacy Id is invalid. Use ' +
+        `/buy/browse/v1/item/get_items_by_item_group?item_group_id=${GROUP_ID} ` +
+        'to get the item group details.',
+      extra,
+    );
+
+  it('recognises the item group error id instead of failing generically', async () => {
+    const { client } = buildClient([{ status: 400, body: itemGroupErrorBody() }]);
+    const provider = new BrowseApiProvider(client);
+
+    const error = await provider
+      .getListing({ marketplaceId: 'EBAY_US', legacyItemId: GROUP_ID })
+      .catch((caught: unknown) => caught);
+
+    expect(isItemGroupError(error)).toBe(true);
+    expect((error as ItemGroupError).itemGroupId).toBe(GROUP_ID);
+    expect((error as ItemGroupError).details).toMatchObject({
+      reason: 'item_group',
+      itemGroupId: GROUP_ID,
+      useTool: 'ebay_get_item_group',
+    });
+  });
+
+  it('prefers the group id eBay names in the error parameters', async () => {
+    const { client } = buildClient([
+      {
+        status: 400,
+        body: itemGroupErrorBody({
+          message: 'The legacy Id is invalid.',
+          longMessage: 'The legacy Id is invalid.',
+          parameters: [
+            {
+              name: 'itemGroupHref',
+              value:
+                'https://api.ebay.com/buy/browse/v1/item/get_items_by_item_group?item_group_id=999888777666',
+            },
+          ],
+        }),
+      },
+    ]);
+    const provider = new BrowseApiProvider(client);
+
+    const error = (await provider
+      .getListing({ marketplaceId: 'EBAY_US', legacyItemId: GROUP_ID })
+      .catch((caught: unknown) => caught)) as ItemGroupError;
+
+    expect(error.itemGroupId).toBe('999888777666');
+  });
+
+  it('falls back to the requested id when eBay names no group', async () => {
+    const { client } = buildClient([
+      { status: 400, body: ebayErrorBody(11_006, 'The legacy Id is invalid.') },
+    ]);
+    const provider = new BrowseApiProvider(client);
+
+    const error = (await provider
+      .getListing({ marketplaceId: 'EBAY_US', legacyItemId: GROUP_ID })
+      .catch((caught: unknown) => caught)) as ItemGroupError;
+
+    expect(error.itemGroupId).toBe(GROUP_ID);
+  });
+
+  it('does not misclassify other eBay 400s as item groups', async () => {
+    const { client } = buildClient([
+      { status: 400, body: ebayErrorBody(11_003, 'The specified item ID was not found.') },
+    ]);
+    const provider = new BrowseApiProvider(client);
+
+    const error = await provider
+      .getListing({ marketplaceId: 'EBAY_US', legacyItemId: GROUP_ID })
+      .catch((caught: unknown) => caught);
+
+    expect(isItemGroupError(error)).toBe(false);
+  });
+
+  it('calls get_items_by_item_group with the item_group_id parameter', async () => {
+    const { client, fetch } = buildClient([{ status: 200, body: { items: [] } }]);
+    const provider = new BrowseApiProvider(client);
+
+    await provider.getItemGroup({ marketplaceId: 'EBAY_GB', itemGroupId: GROUP_ID });
+
+    const request = browseRequests(fetch)[0];
+    const url = new URL(request?.url ?? '');
+    expect(url.pathname).toBe('/buy/browse/v1/item/get_items_by_item_group');
+    expect(url.searchParams.get('item_group_id')).toBe(GROUP_ID);
+    expect(request?.headers['x-ebay-c-marketplace-id']).toBe('EBAY_GB');
+  });
+
+  it('normalises every variation instead of picking one', async () => {
+    const { client } = buildClient([
+      {
+        status: 200,
+        body: {
+          items: [
+            {
+              itemId: `v1|${GROUP_ID}|623456789012`,
+              legacyItemId: GROUP_ID,
+              title: 'Nintendo 64 Console — Charcoal',
+              price: { value: '129.99', currency: 'USD' },
+              condition: 'Used',
+              conditionId: '3000',
+              itemWebUrl: `https://www.ebay.com/itm/${GROUP_ID}`,
+              image: { imageUrl: 'https://i.ebayimg.com/images/g/charcoal/s-l1600.jpg' },
+              seller: { username: 'retro_seller', feedbackPercentage: '99.4' },
+              localizedAspects: [
+                { name: 'Brand', value: 'Nintendo' },
+                { name: 'Colour', value: 'Charcoal' },
+              ],
+              estimatedAvailabilities: [
+                { estimatedAvailabilityStatus: 'IN_STOCK', estimatedAvailableQuantity: 3 },
+              ],
+              shippingOptions: [{ shippingCost: { value: '9.99', currency: 'USD' } }],
+              primaryItemGroup: {
+                itemGroupId: GROUP_ID,
+                itemGroupType: 'SELLER_DEFINED_VARIATIONS',
+                itemGroupTitle: 'Nintendo 64 Console — choose your colour',
+                itemGroupImage: { imageUrl: 'https://i.ebayimg.com/images/g/group/s-l1600.jpg' },
+              },
+            },
+            {
+              itemId: `v1|${GROUP_ID}|623456789013`,
+              legacyItemId: GROUP_ID,
+              title: 'Nintendo 64 Console — Blue',
+              price: { value: '149.99', currency: 'USD' },
+              condition: 'Used',
+              conditionId: '3000',
+              localizedAspects: [
+                { name: 'Brand', value: 'Nintendo' },
+                { name: 'Colour', value: 'Blue' },
+              ],
+              estimatedAvailabilities: [{ estimatedAvailabilityStatus: 'OUT_OF_STOCK' }],
+              primaryItemGroup: { itemGroupId: GROUP_ID },
+            },
+          ],
+          warnings: [{ errorId: 12_501, longMessage: 'One variation was suppressed.' }],
+        },
+      },
+    ]);
+    const provider = new BrowseApiProvider(client);
+
+    const group = await provider.getItemGroup({ marketplaceId: 'EBAY_US', itemGroupId: GROUP_ID });
+
+    expect(group.itemGroupId).toBe(GROUP_ID);
+    expect(group.itemGroupType).toBe('SELLER_DEFINED_VARIATIONS');
+    expect(group.title).toBe('Nintendo 64 Console — choose your colour');
+    expect(group.imageUrl).toBe('https://i.ebayimg.com/images/g/group/s-l1600.jpg');
+    expect(group.items).toHaveLength(2);
+    expect(group.items.map((item) => item.itemId)).toEqual([
+      `v1|${GROUP_ID}|623456789012`,
+      `v1|${GROUP_ID}|623456789013`,
+    ]);
+    expect(group.items[0]).toMatchObject({
+      title: 'Nintendo 64 Console — Charcoal',
+      price: { value: 129.99, currency: 'USD' },
+      condition: 'Used',
+      itemWebUrl: `https://www.ebay.com/itm/${GROUP_ID}`,
+      imageUrl: 'https://i.ebayimg.com/images/g/charcoal/s-l1600.jpg',
+      lowestShippingCost: { value: 9.99, currency: 'USD' },
+      estimatedDeliveredTotal: { value: 139.98, currency: 'USD' },
+      active: true,
+    });
+    expect(group.items[0]?.seller.username).toBe('retro_seller');
+    expect(group.items[0]?.availability?.availableQuantity).toBe(3);
+    expect(group.items[1]?.active).toBe(false);
+    // Only the aspect that actually differs is reported as the distinguishing one.
+    expect(group.varyingAspects).toEqual(['Colour']);
+    expect(group.warnings).toEqual(['One variation was suppressed.']);
+  });
+
+  it('tolerates a group response with no items', async () => {
+    const { client } = buildClient([{ status: 200, body: {} }]);
+    const provider = new BrowseApiProvider(client);
+
+    const group = await provider.getItemGroup({ marketplaceId: 'EBAY_US', itemGroupId: GROUP_ID });
+    expect(group).toMatchObject({ itemGroupId: GROUP_ID, items: [], varyingAspects: [] });
   });
 });
 

@@ -79,6 +79,48 @@ export const internalError = (message: string, cause?: unknown): AppError =>
 
 export const isAppError = (error: unknown): error is AppError => error instanceof AppError;
 
+/**
+ * Raised when eBay resolves an id to a multi-variation *item group* rather than to a single
+ * purchasable listing. eBay signals this with structured error id 11006 on
+ * `get_item_by_legacy_id`; the connector turns it into a specific, machine-readable failure so an
+ * agent can continue on its own instead of having to interpret eBay's English error text.
+ */
+export class ItemGroupError extends AppError {
+  public readonly itemGroupId: string | undefined;
+
+  public constructor(itemGroupId: string | undefined, options: { readonly cause?: unknown } = {}) {
+    super(
+      'bad_request',
+      itemGroupId === undefined
+        ? 'That eBay id identifies a multi-variation item group rather than a single listing. ' +
+            'Retrieve it with the ebay_get_item_group tool.'
+        : `eBay id ${itemGroupId} identifies a multi-variation item group (a listing with ` +
+            'selectable variations such as colour or size) rather than a single purchasable ' +
+            `item. Call ebay_get_item_group with itemGroup '${itemGroupId}' to list the ` +
+            'individual variations, then use one variation itemId with ebay_get_listing.',
+      {
+        details: {
+          reason: 'item_group',
+          ...(itemGroupId === undefined ? {} : { itemGroupId }),
+          useTool: 'ebay_get_item_group',
+        },
+        ...(options.cause === undefined ? {} : { cause: options.cause }),
+      },
+    );
+    this.name = 'ItemGroupError';
+    this.itemGroupId = itemGroupId;
+  }
+
+  /** Returns a copy carrying the group id the caller knows, when eBay did not name one. */
+  public withItemGroupId(itemGroupId: string | undefined): ItemGroupError {
+    if (this.itemGroupId !== undefined || itemGroupId === undefined) return this;
+    return new ItemGroupError(itemGroupId, { cause: this });
+  }
+}
+
+export const isItemGroupError = (error: unknown): error is ItemGroupError =>
+  error instanceof ItemGroupError;
+
 export const toAppError = (error: unknown): AppError => {
   if (isAppError(error)) return error;
   if (error instanceof Error) return internalError(error.message, error);

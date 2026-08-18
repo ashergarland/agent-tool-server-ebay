@@ -34,8 +34,14 @@ export type ItemReferenceKind = 'listing' | 'product';
 
 export interface ItemReference {
   readonly kind: ItemReferenceKind;
-  /** Browse API item id (`v1|...|...`) when the caller supplied one. */
+  /** Browse API item id (`v1|...|...`), either supplied by the caller or derived from a legacy id. */
   readonly itemId: string | undefined;
+  /**
+   * True only when the caller supplied a Browse API item id directly. Such an id must be sent to
+   * `GET /item/{item_id}` unchanged: eBay documents Browse item ids and legacy ids as separate
+   * identifier spaces, so downgrading one to the other is not a lossless round trip.
+   */
+  readonly browseItemIdSupplied: boolean;
   /** Numeric site item id, present for every listing reference. */
   readonly legacyItemId: string | undefined;
   /** Numeric variation id for multi-variation listings; `0` is normalised away. */
@@ -53,6 +59,7 @@ export interface ItemReference {
 const reference = (partial: Partial<ItemReference> & { raw: string }): ItemReference => ({
   kind: partial.kind ?? 'listing',
   itemId: partial.itemId,
+  browseItemIdSupplied: partial.browseItemIdSupplied ?? false,
   legacyItemId: partial.legacyItemId,
   legacyVariationId: partial.legacyVariationId,
   epid: partial.epid,
@@ -144,6 +151,7 @@ export const parseItemReference = (input: unknown): ItemReference => {
     return reference({
       raw,
       itemId: toBrowseItemId(browse.legacyItemId, browse.legacyVariationId),
+      browseItemIdSupplied: true,
       legacyItemId: browse.legacyItemId,
       legacyVariationId: browse.legacyVariationId,
     });
@@ -224,6 +232,108 @@ export const parseItemReference = (input: unknown): ItemReference => {
  */
 export const resolveMarketplace = (
   requested: MarketplaceId | undefined,
-  reference_: ItemReference | undefined,
+  reference_: { readonly marketplaceId: MarketplaceId | undefined } | undefined,
   fallback: MarketplaceId,
 ): MarketplaceId => requested ?? reference_?.marketplaceId ?? fallback;
+
+/* ------------------------------------------------------------- item groups */
+
+/** eBay item group ids share the legacy item id format: the group's parent listing number. */
+const ITEM_GROUP_ID = LEGACY_ITEM_ID;
+
+/** `item_group_id` as it appears in eBay's `itemGroupHref` and in the 11006 error message. */
+const ITEM_GROUP_ID_PARAM = /item_group_id=(\d{1,20})/i;
+
+export interface ItemGroupReference {
+  readonly itemGroupId: string;
+  /** Marketplace implied by the hostname, when the input was a URL on a known eBay site. */
+  readonly marketplaceId: MarketplaceId | undefined;
+  /** The canonical parent listing URL, when one could be derived from the input. */
+  readonly sourceUrl: string | undefined;
+  /** The original caller-supplied string, trimmed. */
+  readonly raw: string;
+}
+
+/**
+ * Pulls the group id out of an eBay `itemGroupHref`
+ * (`https://api.ebay.com/buy/browse/v1/item/get_items_by_item_group?item_group_id=142373490668`).
+ */
+export const itemGroupIdFromHref = (href: unknown): string | undefined => {
+  if (typeof href !== 'string') return undefined;
+  const match = ITEM_GROUP_ID_PARAM.exec(href);
+  return match?.[1];
+};
+
+/**
+ * Parses a caller-supplied reference to a multi-variation item group. Accepted forms are the
+ * numeric group id, the parent listing URL (`/itm/<group-id>`), a Browse item id for one of the
+ * variations (`v1|<group-id>|<variation-id>`, whose first segment *is* the group id) and eBay's
+ * own `get_items_by_item_group?item_group_id=<id>` href.
+ */
+export const parseItemGroupReference = (input: unknown): ItemGroupReference => {
+  if (typeof input !== 'string') {
+    throw badRequest('An eBay item group reference must be a string (listing URL or group id).');
+  }
+
+  const raw = input.trim();
+  if (raw.length === 0) {
+    throw badRequest('An eBay item group reference must not be empty.');
+  }
+  if (raw.length > MAX_INPUT_LENGTH) {
+    throw badRequest(
+      `An eBay item group reference must be at most ${MAX_INPUT_LENGTH} characters.`,
+    );
+  }
+
+  if (ITEM_GROUP_ID.test(raw)) {
+    return { itemGroupId: raw, marketplaceId: undefined, sourceUrl: undefined, raw };
+  }
+
+  const browse = parseBrowseItemId(raw);
+  if (browse) {
+    // A variation's Browse item id is `v1|<group id>|<variation id>`, so the group id is exact.
+    return {
+      itemGroupId: browse.legacyItemId,
+      marketplaceId: undefined,
+      sourceUrl: undefined,
+      raw,
+    };
+  }
+
+  if (/^\d+$/.test(raw)) {
+    throw badRequest(
+      `'${raw}' is not a valid eBay item group id: group ids are 9 to 15 digits. ` +
+        'Paste the full listing URL instead.',
+    );
+  }
+
+  const url = parseUrl(raw);
+  if (!url) {
+    throw badRequest(
+      `Could not parse '${raw}' as an eBay item group. Provide the parent listing URL such as ` +
+        'https://www.ebay.com/itm/142373490668, a numeric item group id, or a Browse item id ' +
+        'such as v1|142373490668|0.',
+    );
+  }
+
+  const fromQuery = itemGroupIdFromHref(url.search);
+  const itmMatch = ITM_PATH.exec(url.pathname);
+  const itemGroupId = fromQuery ?? itmMatch?.[1] ?? queryItemId(url);
+  if (!itemGroupId) {
+    throw badRequest(
+      `'${raw}' is an eBay URL but does not carry an item group id. Item group URLs contain ` +
+        '/itm/ followed by the numeric parent item id, or an item_group_id query parameter.',
+    );
+  }
+
+  // Only eBay marketplace hosts imply a marketplace; the marketplace-neutral API host does not.
+  const marketplaceId = /^api\./i.test(url.hostname) ? undefined : marketplaceForHost(url.hostname);
+  return {
+    itemGroupId,
+    marketplaceId,
+    ...(marketplaceId === undefined
+      ? { sourceUrl: undefined }
+      : { sourceUrl: canonicalUrl(url, itemGroupId) }),
+    raw,
+  };
+};

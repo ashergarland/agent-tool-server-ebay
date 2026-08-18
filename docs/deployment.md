@@ -335,7 +335,12 @@ curl -fsS -H "x-api-key: $API_KEY" -H 'content-type: application/json' \
 
 curl -fsS -H "x-api-key: $API_KEY" -H 'content-type: application/json' \
   -d '{"item":"<an item id returned above>"}' \
-  "https://$FQDN/tools/ebay_get_listing" | jq '{price:.result.listing.price, seller:.result.listing.seller}'
+  "https://$FQDN/tools/ebay_get_listing" | jq '{kind:.result.kind, price:.result.listing.price, seller:.result.listing.seller}'
+
+# A multi-variation listing answers with kind "itemGroup"; ebay_get_item_group fetches it directly.
+curl -fsS -H "x-api-key: $API_KEY" -H 'content-type: application/json' \
+  -d '{"itemGroup":"<an item group id>"}' \
+  "https://$FQDN/tools/ebay_get_item_group" | jq '.result.itemGroup.items[] | {itemId, title, price}'
 
 unset API_KEY
 ```
@@ -351,7 +356,7 @@ Exercise `https://$FQDN/mcp` with an MCP-compatible client. Confirm that:
 
 - an unauthenticated `POST` returns `401`;
 - `initialize` succeeds with the bearer token;
-- `tools/list` returns exactly `ebay_get_listing`, `ebay_search_listings`,
+- `tools/list` returns exactly `ebay_get_listing`, `ebay_get_item_group`, `ebay_search_listings`,
   `ebay_find_similar_listings`, and `ebay_compare_listings`;
 - one representative read invocation succeeds; and
 - no persistent server-side session is required — each `POST` is independent, and `GET`/`DELETE`

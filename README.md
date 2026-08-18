@@ -21,9 +21,26 @@ All tools are read-only and non-consequential:
 | Tool                         | Verified behavior                                                                          |
 | ---------------------------- | ------------------------------------------------------------------------------------------ |
 | `ebay_get_listing`           | Retrieves one listing by eBay URL, numeric item ID, or Browse API item ID.                 |
+| `ebay_get_item_group`        | Retrieves every purchasable variation of a multi-variation listing (item group).           |
 | `ebay_search_listings`       | Searches active listings with bounded keyword, category, seller, price, and other filters. |
 | `ebay_find_similar_listings` | Finds active comparables using EPID, GTIN, MPN, category, and title keywords when present. |
 | `ebay_compare_listings`      | Compares two or more listings, including price, shipping, condition, seller, and returns.  |
+
+### Item identifiers and variation groups
+
+eBay uses two identifier spaces that are not interchangeable, and the server keeps them apart:
+
+- A RESTful Browse item ID (`v1|407111131587|0`) is sent unchanged to `getItem`. It is never
+  rewritten into a legacy lookup.
+- A numeric legacy ID (`407111131587`), including one parsed out of an `/itm/<id>` URL, is resolved
+  through `getItemByLegacyId`.
+- A legacy ID can also identify an _item group_: a multi-variation listing. eBay reports this with
+  structured error ID 11006 rather than returning an item. `ebay_get_listing` recognizes that error
+  ID, resolves the group through `getItemsByItemGroup`, and answers with `kind: "itemGroup"` plus
+  every individual variation. `ebay_get_item_group` does the same lookup directly.
+
+Search results carry `itemGroupType` and `itemGroupId` when eBay reports them, so a row that is a
+variation group can be routed to `ebay_get_item_group` instead of `ebay_get_listing`.
 
 Depending on what eBay returns, listing details can include current price or bid, shipping options,
 estimated delivered total, condition, seller feedback, item location, return terms, availability,

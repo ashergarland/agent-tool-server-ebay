@@ -2,6 +2,7 @@ import { describe, expect, it } from 'vitest';
 import {
   addMoney,
   lowestShippingCost,
+  normaliseItemGroup,
   normaliseListing,
   normaliseListingSummary,
   secondsUntil,
@@ -354,6 +355,98 @@ describe('search summary normalisation', () => {
     const ended = normaliseListingSummary({ itemEndDate: '2024-05-01T00:00:00.000Z' }, options);
     expect(ended.active).toBe(false);
     expect(ended.ended).toBe(true);
+  });
+
+  it('reports no item group metadata for an ordinary single item', () => {
+    expect(summary.itemGroupId).toBeUndefined();
+    expect(summary.itemGroupType).toBeUndefined();
+  });
+
+  it('preserves the item group metadata eBay returns for a variation group row', () => {
+    const group = normaliseListingSummary(
+      {
+        itemId: 'v1|142373490668|623456789012',
+        legacyItemId: '142373490668',
+        title: 'Nintendo 64 Console',
+        itemGroupType: 'SELLER_DEFINED_VARIATIONS',
+        itemGroupHref:
+          'https://api.ebay.com/buy/browse/v1/item/get_items_by_item_group?item_group_id=142373490668',
+      },
+      options,
+    );
+
+    // Enough metadata for the caller to route the follow-up call without guessing.
+    expect(group).toMatchObject({
+      itemId: 'v1|142373490668|623456789012',
+      itemGroupId: '142373490668',
+      itemGroupType: 'SELLER_DEFINED_VARIATIONS',
+    });
+  });
+});
+
+describe('item group normalisation', () => {
+  it('reads the group identity from primaryItemGroup on a single item', () => {
+    const listing = normaliseListing(
+      {
+        itemId: 'v1|142373490668|623456789012',
+        title: 'Nintendo 64 Console — Blue',
+        primaryItemGroup: {
+          itemGroupId: '142373490668',
+          itemGroupType: 'SELLER_DEFINED_VARIATIONS',
+        },
+      },
+      options,
+    );
+
+    expect(listing.itemGroupId).toBe('142373490668');
+    expect(listing.itemGroupType).toBe('SELLER_DEFINED_VARIATIONS');
+  });
+
+  it('falls back to the requested group id when eBay omits primaryItemGroup', () => {
+    const group = normaliseItemGroup(
+      { items: [{ itemId: 'v1|142373490668|1', title: 'One' }] },
+      { ...options, itemGroupId: '142373490668' },
+    );
+
+    expect(group.itemGroupId).toBe('142373490668');
+    expect(group.items).toHaveLength(1);
+  });
+
+  it('reports only the aspects that actually vary', () => {
+    const group = normaliseItemGroup(
+      {
+        items: [
+          {
+            itemId: 'v1|1|1',
+            localizedAspects: [
+              { name: 'Brand', value: 'Nintendo' },
+              { name: 'Colour', value: 'Blue' },
+              { name: 'Capacity', value: '256MB' },
+            ],
+          },
+          {
+            itemId: 'v1|1|2',
+            localizedAspects: [
+              { name: 'Brand', value: 'Nintendo' },
+              { name: 'Colour', value: 'Red' },
+              { name: 'Capacity', value: '512MB' },
+            ],
+          },
+        ],
+      },
+      { ...options, itemGroupId: '1' },
+    );
+
+    expect(group.varyingAspects).toEqual(['Colour', 'Capacity']);
+  });
+
+  it('reports no varying aspects for a single-item group', () => {
+    const group = normaliseItemGroup(
+      { items: [{ itemId: 'v1|1|1', localizedAspects: [{ name: 'Colour', value: 'Blue' }] }] },
+      { ...options, itemGroupId: '1' },
+    );
+
+    expect(group.varyingAspects).toEqual([]);
   });
 });
 

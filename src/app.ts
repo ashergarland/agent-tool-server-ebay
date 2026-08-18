@@ -45,6 +45,7 @@ const lazyProvider = (config: AppConfig): EbayProvider => {
 
   return {
     getListing: (input) => resolve().getListing(input),
+    getItemGroup: (input) => resolve().getItemGroup(input),
     searchListings: (input) => resolve().searchListings(input),
   };
 };

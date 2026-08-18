@@ -1,4 +1,4 @@
-import { AppError } from '../../errors.js';
+import { AppError, ItemGroupError } from '../../errors.js';
 
 /**
  * eBay's standard REST error envelope:
@@ -57,6 +57,53 @@ const looksUnavailable = (summary: string | undefined): boolean =>
   summary !== undefined &&
   /\b(ended|unavailable|no longer available|not available)\b/i.test(summary);
 
+/**
+ * eBay's documented error for "this legacy id is a multi-variation item group": errorId 11006,
+ * domain API_BROWSE, category REQUEST, message "The legacy ID is invalid. Use {itemGroupHref} to
+ * get the item group details." The numeric error id is the discriminator — the English text is
+ * only mined for the group id, and never used to classify.
+ */
+export const ITEM_GROUP_ERROR_ID = 11_006;
+
+const ITEM_GROUP_DOMAIN = 'API_BROWSE';
+
+/** Matches the `item_group_id` query parameter inside eBay's `itemGroupHref`. */
+const ITEM_GROUP_ID_IN_HREF = /item_group_id=(\d{1,20})/i;
+
+const itemGroupErrors = (body: unknown): readonly EbayApiError[] =>
+  (asEnvelope(body).errors ?? []).filter(
+    (error) =>
+      error.errorId === ITEM_GROUP_ERROR_ID &&
+      (error.domain === undefined || error.domain === ITEM_GROUP_DOMAIN),
+  );
+
+/** True when eBay's structured error id says the requested id identifies an item group. */
+export const isItemGroupErrorBody = (body: unknown): boolean => itemGroupErrors(body).length > 0;
+
+/**
+ * Extracts the item group id eBay named, from the `parameters` container it documents for the
+ * `{itemGroupHref}` placeholder, falling back to the same parameter inside the message text.
+ */
+export const itemGroupIdFromErrorBody = (body: unknown): string | undefined => {
+  for (const error of itemGroupErrors(body)) {
+    for (const parameter of error.parameters ?? []) {
+      const fromValue = ITEM_GROUP_ID_IN_HREF.exec(parameter.value ?? '')?.[1];
+      if (fromValue) return fromValue;
+      if (
+        /^item_?group_?id$/i.test(parameter.name ?? '') &&
+        /^\d{1,20}$/.test(parameter.value ?? '')
+      ) {
+        return parameter.value;
+      }
+    }
+    const fromMessage = ITEM_GROUP_ID_IN_HREF.exec(
+      `${error.longMessage ?? ''} ${error.message ?? ''}`,
+    )?.[1];
+    if (fromMessage) return fromMessage;
+  }
+  return undefined;
+};
+
 export interface EbayHttpFailure {
   readonly status: number;
   readonly body: unknown;
@@ -80,6 +127,13 @@ export const mapEbayHttpError = (failure: EbayHttpFailure, context: string): App
   const message = summary
     ? `${context}: ${summary}`
     : `${context}: eBay returned ${failure.status}`;
+
+  // An item group is a distinct, recoverable outcome rather than a malformed request: the caller
+  // asked for a real listing that happens to be a variation parent. eBay documents 11006 under
+  // 400 Bad Request, so a server-side failure is never reinterpreted this way.
+  if (failure.status < 500 && isItemGroupErrorBody(failure.body)) {
+    return new ItemGroupError(itemGroupIdFromErrorBody(failure.body));
+  }
 
   switch (failure.status) {
     case 400:

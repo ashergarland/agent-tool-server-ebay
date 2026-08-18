@@ -1,20 +1,29 @@
-import { badRequest } from '../errors.js';
+import { badRequest, isItemGroupError } from '../errors.js';
 import type {
   EbayProvider,
+  GetListingInput,
+  ItemGroup,
   Listing,
   MarketplaceId,
   SearchResult,
   SearchSort,
 } from '../provider/types.js';
 import {
+  parseItemGroupReference,
   parseItemReference,
   resolveMarketplace,
+  type ItemGroupReference,
   type ItemReference,
 } from '../provider/ebay/index.js';
 import type { Guardrails } from './guardrails.js';
 
 export interface GetListingRequest {
   readonly item: string;
+  readonly marketplaceId?: string | undefined;
+}
+
+export interface GetItemGroupRequest {
+  readonly itemGroup: string;
   readonly marketplaceId?: string | undefined;
 }
 
@@ -49,6 +58,23 @@ export interface ResolvedListing {
   readonly reference: ItemReference;
 }
 
+export interface ResolvedItemGroup {
+  readonly itemGroup: ItemGroup;
+  readonly reference: ItemGroupReference;
+}
+
+/**
+ * What a caller-supplied item reference turned out to be. eBay only reveals that a numeric id is a
+ * variation parent when the lookup fails, so the answer is discriminated rather than assumed.
+ */
+export type ResolvedItemReference =
+  | { readonly kind: 'listing'; readonly listing: Listing; readonly reference: ItemReference }
+  | {
+      readonly kind: 'itemGroup';
+      readonly itemGroup: ItemGroup;
+      readonly reference: ItemReference;
+    };
+
 /**
  * Read-only listing retrieval and search. This layer owns the translation from "whatever the user
  * pasted" to a Browse API call, and the policy decisions (marketplace resolution, result caps,
@@ -63,7 +89,7 @@ export class ListingsService {
   /** Resolves a caller-supplied marketplace string, falling back to the pasted URL's site. */
   public resolveMarketplaceFor(
     requested: string | undefined,
-    reference?: ItemReference,
+    reference?: { readonly marketplaceId: MarketplaceId | undefined },
   ): MarketplaceId {
     const explicit =
       requested === undefined ? undefined : this.guardrails.assertMarketplaceSupported(requested);
@@ -71,10 +97,55 @@ export class ListingsService {
   }
 
   /**
-   * Fetches one listing. A Browse item id is used when the caller supplied one; otherwise the
-   * legacy-id endpoint is used, which is what a pasted `/itm/<id>` URL yields.
+   * Fetches one listing.
+   *
+   * Identifier routing follows eBay's documented model: a Browse item id (`v1|...|...`) is a
+   * RESTful identifier and is passed straight to `GET /item/{item_id}`; a legacy site id — which
+   * is what a pasted `/itm/<id>` URL yields — goes to `getItemByLegacyId`. The two id spaces are
+   * not interchangeable, so a caller-supplied Browse id is never rewritten into a legacy lookup.
+   *
+   * Throws an `ItemGroupError` when the id turns out to identify a multi-variation group; callers
+   * that want the group resolved for them should use {@link resolveItem}.
    */
   public async getListing(request: GetListingRequest): Promise<ResolvedListing> {
+    const { reference, marketplaceId } = this.resolveReference(request);
+    const listing = await this.provider.getListing(
+      this.toGetListingInput(reference, marketplaceId),
+    );
+    return { listing, reference };
+  }
+
+  /**
+   * Resolves whatever the caller pasted: a single listing, or — when eBay reports that the id is a
+   * variation parent — the item group itself. The group is fetched through the documented
+   * `getItemsByItemGroup` endpoint so the caller receives every purchasable variation instead of
+   * an arbitrarily chosen one.
+   */
+  public async resolveItem(request: GetListingRequest): Promise<ResolvedItemReference> {
+    const { reference, marketplaceId } = this.resolveReference(request);
+
+    try {
+      const listing = await this.provider.getListing(
+        this.toGetListingInput(reference, marketplaceId),
+      );
+      return { kind: 'listing', listing, reference };
+    } catch (error) {
+      // Only eBay can tell us the id was a group, and only by failing the single-item lookup.
+      if (!isItemGroupError(error) || error.itemGroupId === undefined) throw error;
+
+      const itemGroup = await this.provider.getItemGroup({
+        marketplaceId,
+        itemGroupId: error.itemGroupId,
+      });
+      return { kind: 'itemGroup', itemGroup, reference };
+    }
+  }
+
+  /** Parses the caller's item reference and settles the marketplace to query it on. */
+  private resolveReference(request: GetListingRequest): {
+    reference: ItemReference;
+    marketplaceId: MarketplaceId;
+  } {
     const reference = parseItemReference(request.item);
     if (reference.kind === 'product') {
       throw badRequest(
@@ -84,11 +155,19 @@ export class ListingsService {
         { epid: reference.epid },
       );
     }
+    return {
+      reference,
+      marketplaceId: this.resolveMarketplaceFor(request.marketplaceId, reference),
+    };
+  }
 
-    const marketplaceId = this.resolveMarketplaceFor(request.marketplaceId, reference);
-    const listing = await this.provider.getListing({
+  private toGetListingInput(
+    reference: ItemReference,
+    marketplaceId: MarketplaceId,
+  ): GetListingInput {
+    return {
       marketplaceId,
-      ...(reference.legacyItemId === undefined
+      ...(reference.browseItemIdSupplied || reference.legacyItemId === undefined
         ? { itemId: reference.itemId }
         : {
             legacyItemId: reference.legacyItemId,
@@ -96,9 +175,18 @@ export class ListingsService {
               ? {}
               : { legacyVariationId: reference.legacyVariationId }),
           }),
-    });
+    };
+  }
 
-    return { listing, reference };
+  /** Retrieves every purchasable variation of a multi-variation listing. */
+  public async getItemGroup(request: GetItemGroupRequest): Promise<ResolvedItemGroup> {
+    const reference = parseItemGroupReference(request.itemGroup);
+    const marketplaceId = this.resolveMarketplaceFor(request.marketplaceId, reference);
+    const itemGroup = await this.provider.getItemGroup({
+      marketplaceId,
+      itemGroupId: reference.itemGroupId,
+    });
+    return { itemGroup, reference };
   }
 
   /** Structured search over active eBay listings. */

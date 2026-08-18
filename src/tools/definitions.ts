@@ -163,6 +163,17 @@ const listingSchema = z
   .object({
     itemId: z.string().describe('Browse API item id, e.g. v1|407111131587|0.'),
     legacyItemId: z.string().optional().describe('Numeric eBay item id shown in listing URLs.'),
+    itemGroupId: z
+      .string()
+      .optional()
+      .describe(
+        'Parent item group id when this listing is one variation of a multi-variation listing. ' +
+          'Pass it to ebay_get_item_group to see the sibling variations.',
+      ),
+    itemGroupType: z
+      .string()
+      .optional()
+      .describe("eBay's item group type, currently only SELLER_DEFINED_VARIATIONS."),
     title: z.string(),
     subtitle: z.string().optional(),
     shortDescription: z.string().optional(),
@@ -250,6 +261,20 @@ const listingSummarySchema = z
   .object({
     itemId: z.string(),
     legacyItemId: z.string().optional(),
+    itemGroupId: z
+      .string()
+      .optional()
+      .describe(
+        'Item group id when this row is a multi-variation listing. Retrieve it with ' +
+          'ebay_get_item_group; it is not a single purchasable item.',
+      ),
+    itemGroupType: z
+      .string()
+      .optional()
+      .describe(
+        'Present only for multi-variation listings (SELLER_DEFINED_VARIATIONS). When set, use ' +
+          'ebay_get_item_group with itemGroupId instead of ebay_get_listing with itemId.',
+      ),
     title: z.string(),
     itemWebUrl: z.string().optional(),
     itemAffiliateWebUrl: z.string().optional(),
@@ -286,6 +311,56 @@ const referenceSchema = z.object({
   sourceUrl: z.string().optional(),
 });
 
+const itemGroupVariationSchema = z.object({
+  itemId: z
+    .string()
+    .describe('RESTful Browse item id of this variation; pass it to ebay_get_listing as-is.'),
+  legacyItemId: z.string().optional(),
+  title: z.string(),
+  itemWebUrl: z.string().optional(),
+  price: moneySchema.optional(),
+  currentBidPrice: moneySchema.optional(),
+  buyingOptions: z.array(z.string()),
+  condition: z.string().optional(),
+  conditionId: z.string().optional(),
+  itemSpecifics: z
+    .array(itemAspectSchema)
+    .describe('Item specifics for this variation, including the aspects that distinguish it.'),
+  availability: availabilitySchema.optional(),
+  availabilityStatus: z.string().optional(),
+  active: z.boolean(),
+  seller: sellerSchema,
+  shippingOptions: z.array(shippingOptionSchema),
+  lowestShippingCost: moneySchema.optional(),
+  estimatedDeliveredTotal: moneySchema.optional(),
+  imageUrl: z.string().optional(),
+});
+
+const itemGroupSchema = z
+  .object({
+    itemGroupId: z.string(),
+    itemGroupType: z.string().optional().describe('e.g. SELLER_DEFINED_VARIATIONS.'),
+    title: z.string().optional().describe('Title shown on the item group page.'),
+    imageUrl: z.string().optional(),
+    marketplaceId: z.string(),
+    items: z
+      .array(itemGroupVariationSchema)
+      .describe('Every individually purchasable variation eBay returned for the group.'),
+    varyingAspects: z
+      .array(z.string())
+      .describe(
+        'Item specific names whose values differ between the variations, e.g. ["Colour","Size"].',
+      ),
+    warnings: z.array(z.string()),
+  })
+  .describe('A normalised eBay multi-variation listing (item group).');
+
+const itemGroupReferenceSchema = z.object({
+  itemGroupId: z.string(),
+  marketplaceId: z.string().optional(),
+  sourceUrl: z.string().optional(),
+});
+
 /* -------------------------------------------------------------------- tools */
 
 export const getListingTool = defineTool({
@@ -297,30 +372,90 @@ export const getListingTool = defineTool({
     'shipping cost and estimated delivered total, auction status and time remaining, condition ' +
     "and the seller's condition notes, seller feedback, return policy, quantity, category, item " +
     'specifics and images. Use this whenever the user pastes an eBay link or item number — it ' +
-    'returns the actual listing from eBay, not a web page guess. Only active-listing data is ' +
-    'available; the connector cannot retrieve sold or completed prices.',
+    'returns the actual listing from eBay, not a web page guess. If the id turns out to be a ' +
+    'multi-variation listing (an item group parent), the response reports kind="itemGroup" and ' +
+    'carries the group with every purchasable variation instead of a single listing. Only ' +
+    'active-listing data is available; the connector cannot retrieve sold or completed prices.',
   kind: 'read',
   inputSchema: z.object({
     item: itemReference,
     marketplaceId: marketplaceId.optional(),
   }),
   outputSchema: z.object({
-    listing: listingSchema,
+    kind: z
+      .enum(['listing', 'itemGroup'])
+      .describe(
+        "'listing' when the id is a single purchasable item and `listing` is populated; " +
+          "'itemGroup' when it is a multi-variation parent and `itemGroup` is populated instead.",
+      ),
+    listing: listingSchema.optional(),
+    itemGroup: itemGroupSchema.optional(),
     reference: referenceSchema,
   }),
   handler: async (input, services) => {
-    const { listing, reference } = await services.listings.getListing({
+    const resolved = await services.listings.resolveItem({
       item: input.item,
       ...(input.marketplaceId === undefined ? {} : { marketplaceId: input.marketplaceId }),
     });
+    const { reference } = resolved;
     return {
-      listing: writable(listing),
+      kind: resolved.kind,
+      ...(resolved.kind === 'listing'
+        ? { listing: writable(resolved.listing) }
+        : { itemGroup: writable(resolved.itemGroup) }),
       reference: {
         ...(reference.itemId === undefined ? {} : { itemId: reference.itemId }),
         ...(reference.legacyItemId === undefined ? {} : { legacyItemId: reference.legacyItemId }),
         ...(reference.legacyVariationId === undefined
           ? {}
           : { legacyVariationId: reference.legacyVariationId }),
+        ...(reference.marketplaceId === undefined
+          ? {}
+          : { marketplaceId: reference.marketplaceId }),
+        ...(reference.sourceUrl === undefined ? {} : { sourceUrl: reference.sourceUrl }),
+      },
+    };
+  },
+});
+
+export const getItemGroupTool = defineTool({
+  name: 'ebay_get_item_group',
+  title: 'Get an eBay multi-variation listing',
+  summary: 'Retrieve every purchasable variation of an eBay multi-variation listing (item group).',
+  description:
+    'Fetches an eBay item group — a listing whose variations differ by colour, size, capacity, ' +
+    'model and so on — through the official Browse API getItemsByItemGroup method. Returns each ' +
+    'individually purchasable variation with its own RESTful itemId, title, price, condition, ' +
+    'item specifics, availability, seller, shipping and image, plus the aspect names that ' +
+    'distinguish the variations. Use it when ebay_search_listings returned a row with ' +
+    'itemGroupType set, or when ebay_get_listing reported kind="itemGroup". Take a variation ' +
+    "itemId from the result to fetch that single variation's full detail with ebay_get_listing.",
+  kind: 'read',
+  inputSchema: z.object({
+    itemGroup: z
+      .string()
+      .min(1)
+      .max(2048)
+      .describe(
+        'An eBay item group id (142373490668), the parent listing URL ' +
+          '(https://www.ebay.com/itm/142373490668), a Browse item id of one of the variations ' +
+          '(v1|142373490668|623456789012), or an itemGroupHref containing item_group_id.',
+      ),
+    marketplaceId: marketplaceId.optional(),
+  }),
+  outputSchema: z.object({
+    itemGroup: itemGroupSchema,
+    reference: itemGroupReferenceSchema,
+  }),
+  handler: async (input, services) => {
+    const { itemGroup, reference } = await services.listings.getItemGroup({
+      itemGroup: input.itemGroup,
+      ...(input.marketplaceId === undefined ? {} : { marketplaceId: input.marketplaceId }),
+    });
+    return {
+      itemGroup: writable(itemGroup),
+      reference: {
+        itemGroupId: reference.itemGroupId,
         ...(reference.marketplaceId === undefined
           ? {}
           : { marketplaceId: reference.marketplaceId }),
@@ -552,6 +687,7 @@ export const compareListingsTool = defineTool({
 
 export const toolDefinitions = [
   getListingTool,
+  getItemGroupTool,
   searchListingsTool,
   findSimilarListingsTool,
   compareListingsTool,
