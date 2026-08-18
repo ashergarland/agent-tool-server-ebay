@@ -61,11 +61,23 @@ export const signedNotification = (
 export class FakePublicKeyProvider implements PublicKeyProvider {
   public calls = 0;
 
-  public constructor(private readonly key: string = testPublicKeyAsEbayReturnsIt) {}
+  public constructor(
+    private readonly key: string = testPublicKeyAsEbayReturnsIt,
+    /**
+     * The metadata `getPublicKey` reports alongside the key. Overridable so tests can prove the
+     * verifier cross-checks it against the signature header.
+     */
+    private readonly metadata: Partial<Pick<EbayPublicKey, 'algorithm' | 'digest'>> = {},
+  ) {}
 
   public getPublicKey(_keyId: string): Promise<EbayPublicKey> {
     this.calls += 1;
-    return Promise.resolve({ key: this.key, algorithm: 'ECDSA', digest: 'SHA1' });
+    return Promise.resolve({
+      key: this.key,
+      algorithm: 'ECDSA',
+      digest: 'SHA1',
+      ...this.metadata,
+    });
   }
 }
 

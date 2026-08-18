@@ -173,11 +173,16 @@ including any trailing slash.
 **Notification handling (`POST`).** The `x-ebay-signature` header is base64-decoded into
 `{alg, kid, signature, digest}`; the public key named by `kid` is fetched from the official
 Notification API (`/commerce/notification/v1/public_key/{kid}`) using the same eBay client-credentials
-OAuth machinery the Browse tools already use, and cached for one hour in a size-bounded cache; the
-ECDSA signature is then verified over the received bytes. Only after the signature verifies is the
-payload validated against the `MARKETPLACE_ACCOUNT_DELETION` schema. A verified notification is
-acknowledged with `204`, an unverifiable signature with `412`, and a malformed request with a bounded
-`4xx`.
+OAuth machinery the Browse tools already use, and cached for one hour in a size-bounded cache. The
+header's `alg` and `digest` are then cross-checked case-insensitively against the `algorithm` and
+`digest` eBay reports for that key, and a disagreement is rejected before any cryptography is
+attempted — the header is attacker-supplied, the key metadata is not. Only then is the ECDSA
+signature verified over the received bytes, and only after that is the payload validated against the
+`MARKETPLACE_ACCOUNT_DELETION` schema. A verified notification is acknowledged with `204`, an
+unverifiable signature with `412`, and a malformed request with a bounded `4xx`.
+
+The comparison is case-insensitive by necessity, not convenience: eBay's own published test vector
+sends `"alg":"ecdsa"` in the header while `getPublicKey` reports `"algorithm":"ECDSA"`.
 
 Because the callback must be public, the key lookup it triggers is bounded independently of anything
 the caller controls: failed lookups are remembered briefly so a replayed unknown `kid` cannot be
@@ -374,8 +379,14 @@ Vitest covers configuration normalization, authentication, rate limiting, provid
 normalization, service guardrails, all tool schemas, OpenAPI, HTTP, stdio-compatible MCP,
 Streamable HTTP MCP, eBay account-deletion challenge/schema/signature/public-key-caching behavior,
 and deployment parameter integrity. Fakes prevent default tests from calling eBay; the
-account-deletion signature fixtures generate their own P-256 key pair, so no eBay credential is ever
+account-deletion signature tests generate their own P-256 key pair, so no eBay credential is ever
 required.
+
+Those generated-key tests prove the implementation is self-consistent, which a self-consistent
+implementation of the _wrong_ protocol would also achieve. `tests/unit/compliance/published-fixture.test.ts`
+closes that gap by verifying eBay's own published test vector from the official
+`event-notification-nodejs-sdk` — public sample data, committed with its upstream URL and blob SHA,
+and still requiring no network call or credential.
 
 CI enforces lockfile installation, formatting, lint, typecheck, coverage, production build,
 OpenAPI generation, official-schema `server.json` validation, container build and smoke tests

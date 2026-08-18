@@ -222,3 +222,105 @@ describe('EbaySignatureVerifier', () => {
     }
   });
 });
+
+/**
+ * The signature header is attacker-supplied; the key metadata comes back from eBay over an
+ * authenticated call. Where the two disagree about how the signature was produced, the header is
+ * the untrusted side and the notification is rejected.
+ */
+describe('signature header / public key metadata cross-check', () => {
+  const verify = (provider: PublicKeyProvider): Promise<void> => {
+    const body = validNotificationBody();
+    const { raw, header } = signedNotification(body);
+    return new EbaySignatureVerifier({ publicKeys: provider }).verify({
+      rawBody: raw,
+      parsedBody: body,
+      signatureHeader: header,
+    });
+  };
+
+  it('accepts a signature whose header agrees with the key metadata', async () => {
+    await expect(
+      verify(new FakePublicKeyProvider(undefined, { algorithm: 'ECDSA', digest: 'SHA1' })),
+    ).resolves.toBeUndefined();
+  });
+
+  it('accepts metadata that differs only by case', async () => {
+    // eBay's own published fixture sends "ecdsa" in the header while getPublicKey reports "ECDSA".
+    await expect(
+      verify(new FakePublicKeyProvider(undefined, { algorithm: 'ecdsa', digest: 'sha1' })),
+    ).resolves.toBeUndefined();
+  });
+
+  it('rejects an algorithm that disagrees with the signing key', async () => {
+    expect(
+      await statusOf(() => verify(new FakePublicKeyProvider(undefined, { algorithm: 'RSA' }))),
+    ).toBe(412);
+  });
+
+  it('rejects a digest that disagrees with the signing key', async () => {
+    expect(
+      await statusOf(() => verify(new FakePublicKeyProvider(undefined, { digest: 'SHA256' }))),
+    ).toBe(412);
+  });
+
+  it.each([
+    ['algorithm', { algorithm: undefined }],
+    ['digest', { digest: undefined }],
+    ['both fields', { algorithm: undefined, digest: undefined }],
+  ])(
+    'tolerates absent %s, because cryptographic verification remains the real gate',
+    async (_label, metadata) => {
+      // eBay documents both with occurrence "Always", so absence would be a contract violation
+      // rather than a normal case. Failing closed on it would add brittleness without protection.
+      await expect(verify(new FakePublicKeyProvider(undefined, metadata))).resolves.toBeUndefined();
+    },
+  );
+
+  it('treats empty-string metadata as absent rather than as a mismatch', async () => {
+    await expect(
+      verify(new FakePublicKeyProvider(undefined, { algorithm: '', digest: '' })),
+    ).resolves.toBeUndefined();
+  });
+
+  it('rejects on metadata grounds alone, for input that would otherwise verify', async () => {
+    const body = validNotificationBody();
+    const { raw, header } = signedNotification(body);
+    const input = { rawBody: raw, parsedBody: body, signatureHeader: header };
+
+    // Control: this exact input verifies when the metadata agrees.
+    await expect(
+      new EbaySignatureVerifier({ publicKeys: new FakePublicKeyProvider() }).verify(input),
+    ).resolves.toBeUndefined();
+
+    // Only the reported metadata changes, and the same input is now refused.
+    expect(
+      await statusOf(() =>
+        new EbaySignatureVerifier({
+          publicKeys: new FakePublicKeyProvider(undefined, { algorithm: 'RSA' }),
+        }).verify(input),
+      ),
+    ).toBe(412);
+  });
+
+  it('never exposes the key, the signature or account identifiers on a mismatch', async () => {
+    const body = validNotificationBody();
+    const { raw, header } = signedNotification(body);
+
+    try {
+      await new EbaySignatureVerifier({
+        publicKeys: new FakePublicKeyProvider(undefined, { algorithm: 'RSA', digest: 'SHA512' }),
+      }).verify({ rawBody: raw, parsedBody: body, signatureHeader: header });
+      expect.unreachable('expected a rejection');
+    } catch (error) {
+      const serialised = JSON.stringify(error, Object.getOwnPropertyNames(error));
+      expect(serialised).not.toContain(header);
+      expect(serialised).not.toContain('BEGIN PUBLIC KEY');
+      expect(serialised).not.toContain(testPublicKeyPem);
+      expect(serialised).not.toContain('example_user');
+      expect(serialised).not.toContain('example-user-id');
+      // The kid is an eBay-internal key identifier and is not echoed either.
+      expect(serialised).not.toContain('test-key-id-0001');
+    }
+  });
+});

@@ -10,10 +10,15 @@
 # The parameter file defaults to infra/parameters/<environment>.parameters.json and is the
 # canonical source of environment configuration; see scripts/bootstrap/common.sh for precedence.
 #
-# Optionally export EBAY_CLIENT_ID and EBAY_CLIENT_SECRET beforehand and this script will store
-# the real values instead of placeholders.
+# Export EBAY_CLIENT_ID and EBAY_CLIENT_SECRET beforehand. They are required whenever the vault
+# does not already hold them and the target is eBay production; placeholder credentials are never
+# written to a production vault. Use a prompt rather than the command line so the values do not
+# enter your shell history:
 #
-# Requires: az CLI (logged in), openssl.
+#   read -rs EBAY_CLIENT_ID && export EBAY_CLIENT_ID
+#   read -rs EBAY_CLIENT_SECRET && export EBAY_CLIENT_SECRET
+#
+# Requires: az CLI (logged in), openssl, node.
 
 set -euo pipefail
 
@@ -74,14 +79,27 @@ fi
 # Creates a secret only when it does not already exist, so re-running never rotates credentials.
 # The implementation lives in common.sh so it can be exercised by
 # scripts/verify-parameter-resolution.sh without touching Azure.
+#
+# The eBay credentials are checked *before* anything is written. Provisioning used to fall back to
+# `REPLACE_WITH_EBAY_APP_ID` / `REPLACE_WITH_EBAY_CERT_ID` when the environment variables were
+# absent, and because existing secrets are deliberately never overwritten, that placeholder then
+# survived every later run.
+if targets_ebay_production "${ENVIRONMENT}" "${PARAMETER_FILE}" "${PARAMETER_OVERLAY}"; then
+  EBAY_TARGET_IS_PRODUCTION='true'
+else
+  EBAY_TARGET_IS_PRODUCTION='false'
+fi
+
+echo "==> Checking eBay application credentials (production target: ${EBAY_TARGET_IS_PRODUCTION})"
+assert_ebay_credentials_available "${KEY_VAULT}" "${EBAY_TARGET_IS_PRODUCTION}"
 
 echo "==> Seeding secrets in ${KEY_VAULT}"
 if ensure_secret "${KEY_VAULT}" "${SECRET_API_KEY}" "$(openssl rand -hex 32)"; then
   echo "    Retrieve the generated connector API key with:"
   echo "    az keyvault secret show --vault-name ${KEY_VAULT} --name ${SECRET_API_KEY} --query value -o tsv"
 fi
-ensure_secret "${KEY_VAULT}" "${SECRET_EBAY_CLIENT_ID}" "${EBAY_CLIENT_ID:-REPLACE_WITH_EBAY_APP_ID}" || true
-ensure_secret "${KEY_VAULT}" "${SECRET_EBAY_CLIENT_SECRET}" "${EBAY_CLIENT_SECRET:-REPLACE_WITH_EBAY_CERT_ID}" || true
+ensure_ebay_credential "${KEY_VAULT}" "${SECRET_EBAY_CLIENT_ID}" 'EBAY_CLIENT_ID' 'REPLACE_WITH_EBAY_APP_ID'
+ensure_ebay_credential "${KEY_VAULT}" "${SECRET_EBAY_CLIENT_SECRET}" 'EBAY_CLIENT_SECRET' 'REPLACE_WITH_EBAY_CERT_ID'
 # 48 hexadecimal characters sits inside eBay's documented 32-80 character limit and uses only
 # characters from its allowed alphanumeric/underscore/hyphen set. It is generated rather than
 # supplied so no operator ever has to invent, paste or store one outside Key Vault.
@@ -158,16 +176,13 @@ Retrieve secrets only when you need them, and do not paste them into shared logs
   az keyvault secret show --vault-name ${KEY_VAULT} --name ${SECRET_ACCOUNT_DELETION_TOKEN} --query value -o tsv
 
 Next steps:
-  1. Store your real eBay application credentials (skip if you exported them above):
-       az keyvault secret set --vault-name ${KEY_VAULT} --name ${SECRET_EBAY_CLIENT_ID} --value '<App ID>'
-       az keyvault secret set --vault-name ${KEY_VAULT} --name ${SECRET_EBAY_CLIENT_SECRET} --value '<Cert ID>'
-  2. Build and push the real image:
+  1. Build and push the real image:
        ./scripts/bootstrap/deploy.sh ${SUBSCRIPTION_ID} ${ENVIRONMENT} ${LOCATION} ${PARAMETER_FILE}
-  3. Register the account deletion callback in the eBay developer portal under
+  2. Register the account deletion callback in the eBay developer portal under
      Application Keys -> Production keyset -> Alerts & Notifications, using
        ${CALLBACK_URL}
      and the verification token above. See docs/deployment.md for the full runbook.
-  4. Register the connector in ChatGPT using ${CONNECTOR_URL}/openapi.json
+  3. Register the connector in ChatGPT using ${CONNECTOR_URL}/openapi.json
      with the API key from Key Vault as the bearer token.
 
 SUMMARY

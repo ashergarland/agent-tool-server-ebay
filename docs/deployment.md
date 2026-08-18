@@ -57,8 +57,8 @@ repository implements the endpoint; see
 From the repository root:
 
 ```bash
-export EBAY_CLIENT_ID='...'
-export EBAY_CLIENT_SECRET='...'
+read -rs EBAY_CLIENT_ID && export EBAY_CLIENT_ID
+read -rs EBAY_CLIENT_SECRET && export EBAY_CLIENT_SECRET
 
 ./scripts/bootstrap/provision.sh <subscription-id> prod westus2 infra/parameters/prod.parameters.json
 ./scripts/bootstrap/deploy.sh    <subscription-id> prod westus2 infra/parameters/prod.parameters.json
@@ -75,8 +75,46 @@ verification token, and the supplied eBay credentials. The second pass creates t
 which reads those values directly from Key Vault. A third pass applies `PUBLIC_BASE_URL` and the
 account-deletion callback URL, neither of which can be known until ingress exists.
 
-If eBay credentials are omitted, the script writes conspicuous placeholders and prints commands for
-replacing them. Replace both before expecting eBay tool calls to succeed.
+### eBay credentials are required, never placeheld
+
+`EBAY_CLIENT_ID` and `EBAY_CLIENT_SECRET` are required whenever the vault does not already hold
+them and the deployment targets the eBay **production** keyset. Provisioning validates this up
+front and aborts before writing anything, so a run can never half-complete.
+
+Earlier revisions wrote `REPLACE_WITH_EBAY_APP_ID` / `REPLACE_WITH_EBAY_CERT_ID` when the variables
+were absent. That was a trap: because an existing secret is deliberately never overwritten, the
+placeholder survived every later provisioning run, and every eBay call failed against a value
+nothing in the system could tell was fake. Placeholders are therefore never written to a production
+vault, under any combination of flags.
+
+A target counts as production when the environment is named `prod`-like **or** any parameter file
+that contributes to the deployment declares `ebayEnvironment: production` — the committed file and
+the operator overlay alike, since the overlay is layered last and wins at deploy time. All signals
+are consulted so an environment named something else, or a sandbox base that an overlay flips to
+the production keyset, cannot quietly opt out. An unreadable or malformed parameter file is treated
+as production, which is the direction that fails safe.
+
+Behaviour in full:
+
+| Vault state    | Target         | Environment variables | Result                                                   |
+| -------------- | -------------- | --------------------- | -------------------------------------------------------- |
+| Secret exists  | any            | not needed            | Left untouched; never rotated                            |
+| Secret missing | production     | supplied              | Written once                                             |
+| Secret missing | production     | absent                | **Aborts** before any write, with the commands to fix it |
+| Secret missing | non-production | supplied              | Written once                                             |
+| Secret missing | non-production | absent                | Aborts unless `ALLOW_PLACEHOLDER_EBAY_CREDENTIALS=1`     |
+
+The non-production opt-in exists only to let sandbox and throwaway environments stand the
+infrastructure up before credentials are available. It is refused outright on a production target,
+and it warns that every eBay call will fail until the values are replaced by hand.
+
+To correct a vault that already holds placeholders from an earlier bootstrap, overwrite them
+explicitly — provisioning will not do it for you:
+
+```bash
+az keyvault secret set --vault-name "$KEY_VAULT" --name ebay-client-id     --value '<App ID>'
+az keyvault secret set --vault-name "$KEY_VAULT" --name ebay-client-secret --value '<Cert ID>'
+```
 
 The initial app uses a placeholder image. `deploy.sh` builds the current commit in ACR, updates the
 Container App, sets its public URLs, and verifies `/health`. Do not register the connector before
@@ -139,6 +177,10 @@ Put them in the environment rather than on a command line, so they do not enter 
 read -rs EBAY_CLIENT_ID && export EBAY_CLIENT_ID
 read -rs EBAY_CLIENT_SECRET && export EBAY_CLIENT_SECRET
 ```
+
+Both are **required** for a production target unless the vault already holds them. Provisioning
+aborts up front rather than writing a placeholder; see
+[eBay credentials are required, never placeheld](#ebay-credentials-are-required-never-placeheld).
 
 ### Step 2 — Provision Azure
 
@@ -464,6 +506,55 @@ Running `provision.sh` again never rotates any of these secrets; it only creates
 missing.
 
 Avoid passing secrets in command history, CI output, issue reports, or screenshots.
+
+## Open item: bound the trusted proxy configuration
+
+**Status: deferred pending a deployed environment. Verify this after the first production deploy.**
+
+The Fastify server is configured with `trustProxy: true`, which makes it accept the entire
+caller-supplied `X-Forwarded-For` chain when deriving `request.ip`. A caller can therefore forge
+that header and present an arbitrary address.
+
+What this does and does not affect:
+
+- **Not affected:** the per-principal rate limit on `/tools` and `/mcp`, which is keyed on the
+  authenticated API key rather than on an address, and authentication itself.
+- **Not affected:** the eBay account-deletion callback's real ceiling, which is the global outbound
+  key-lookup budget and negative caching in `NotificationApiPublicKeyProvider` — deliberately
+  independent of anything the caller controls.
+- **Affected:** the pre-authentication flood limiter and the callback's per-address limit, both of
+  which are defence in depth only. A caller rotating `X-Forwarded-For` gets a fresh bucket each
+  request.
+
+This was left unchanged rather than tightened, deliberately:
+
+1. There is no bounded hop-count convention to follow. Across the sibling hosted tool servers,
+   eight set `trustProxy: false`, two (this repo and `agent-tool-server-azure`) set `true`, and one
+   (`agent-tool-server-data-cruncher`) makes it configurable via `TRUST_PROXY` with a default of
+   `false`. `agent-tool-platform` has no shared implementation.
+2. No repository documents the Azure Container Apps ingress hop count, and it cannot be established
+   from the Bicep alone.
+3. Guessing is worse than leaving it. Too high a hop count leaves the header forgeable anyway; too
+   low collapses every caller onto the ingress address, putting all traffic in a single
+   rate-limit bucket and turning the limiter into a self-inflicted outage.
+
+**Verification procedure once an environment exists.** Send a request through the public ingress
+with a known-fake prefix and observe what the application actually receives:
+
+```bash
+curl -fsS -H 'x-forwarded-for: 203.0.113.9' "https://$FQDN/health" -o /dev/null
+
+az containerapp logs show --resource-group "$RESOURCE_GROUP" --name "$APP_NAME" --tail 50 \
+  | grep -o '"remoteAddress":"[^"]*"'
+```
+
+Count the entries the ingress appends to the chain. If that count is stable, replace
+`trustProxy: true` in [`src/server/http.ts`](../src/server/http.ts) with that integer, following
+the `TRUST_PROXY` configuration shape already used by `agent-tool-server-data-cruncher` so the
+portfolio converges on one pattern: a value that distinguishes an integer hop count from boolean
+`true`, bounded by default in production, and permissive for local development. Add a test proving
+that a forged `X-Forwarded-For` prefix cannot create arbitrary rate-limit buckets while the trusted
+ingress suffix is unchanged.
 
 ## Monitoring and logs
 
