@@ -131,7 +131,7 @@ const toolPath = (tool: RegisteredTool): JsonObject => ({
   post: {
     operationId: tool.name,
     summary: tool.summary,
-    description: tool.description,
+    description: tool.summary,
     tags: [tool.kind === 'write' ? 'operations' : 'read'],
     'x-openai-isConsequential': tool.kind === 'write',
     requestBody: {

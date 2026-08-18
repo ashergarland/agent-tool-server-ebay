@@ -3,10 +3,16 @@ import { buildOpenApiDocument } from '../../src/openapi/document.js';
 import { createToolRegistry } from '../../src/tools/registry.js';
 import { testConfig } from '../helpers/config.js';
 
-const document = buildOpenApiDocument(testConfig(), createToolRegistry()) as Record<
-  string,
-  unknown
->;
+const registry = createToolRegistry();
+const document = buildOpenApiDocument(testConfig(), registry) as Record<string, unknown>;
+
+const expectedToolNames = [
+  'ebay_get_listing',
+  'ebay_get_item_group',
+  'ebay_search_listings',
+  'ebay_find_similar_listings',
+  'ebay_compare_listings',
+] as const;
 
 /**
  * ChatGPT rejects an imported Action schema when an object schema declares no properties, so a
@@ -53,6 +59,24 @@ describe('OpenAPI document', () => {
 
   it('never emits an object schema without a declared shape', () => {
     expect(bareObjectSchemas(document)).toEqual([]);
+  });
+
+  it('emits every tool as a GPT Actions-compatible POST operation', () => {
+    expect(registry.list().map((tool) => tool.name)).toEqual(expectedToolNames);
+
+    for (const tool of registry.list()) {
+      const operation = at(document, 'paths', `/tools/${tool.name}`, 'post') as Record<
+        string,
+        unknown
+      >;
+
+      expect(operation['operationId']).toBe(tool.name);
+      expect(operation['summary']).toBe(tool.summary);
+      expect(typeof operation['summary']).toBe('string');
+      expect(operation['description']).toBe(tool.summary);
+      expect(typeof operation['description']).toBe('string');
+      expect((operation['description'] as string).length).toBeLessThanOrEqual(300);
+    }
   });
 
   it('describes the /version payload so the importer can validate it', () => {
