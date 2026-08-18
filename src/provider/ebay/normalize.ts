@@ -461,9 +461,6 @@ export const normaliseWarnings = (payload: unknown): readonly string[] =>
 export const normaliseTotal = (payload: unknown): number | undefined =>
   int(asObject(payload)?.['total']);
 
-/** eBay caps a variation listing well below this; the bound only protects against a runaway payload. */
-const MAX_GROUP_ITEMS = 200;
-
 /** Projects an already-normalised listing down to the fields that distinguish one variation. */
 const toVariation = (listing: Listing): ItemGroupVariation => ({
   itemId: listing.itemId,
@@ -513,13 +510,16 @@ export interface NormaliseItemGroupOptions extends NormaliseOptions {
  * is a full `Item`, so each one is normalised with {@link normaliseListing} and then projected:
  * the group is reported as the set of its individual purchasable variations, never collapsed into
  * a single representative item.
+ *
+ * Every variation eBay returns is kept. `getItemsByItemGroup` is not paged and returns the whole
+ * group in one response, so any connector-side bound here could only drop real purchasable items.
  */
 export const normaliseItemGroup = (
   payload: unknown,
   options: NormaliseItemGroupOptions,
 ): ItemGroup => {
   const group = asObject(payload) ?? {};
-  const rawItems = asArray(group['items']).slice(0, MAX_GROUP_ITEMS);
+  const rawItems = asArray(group['items']);
 
   const items = rawItems.map((item) =>
     toVariation(
