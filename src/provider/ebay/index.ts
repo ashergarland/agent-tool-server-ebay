@@ -23,6 +23,7 @@ import { parseBrowseItemId } from './urls.js';
 
 export { EbayTokenProvider, EbayRestClient };
 export * from './marketplaces.js';
+export * from './short-links.js';
 export * from './urls.js';
 export { buildSearchFilter, toEbaySort } from './filters.js';
 export { buildEndUserContext } from './rest.js';

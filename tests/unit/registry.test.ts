@@ -58,6 +58,18 @@ describe('ToolRegistry', () => {
     }
   });
 
+  it('advertises eBay app mobile share links on every listing-reference tool', () => {
+    for (const name of [
+      'ebay_get_listing',
+      'ebay_find_similar_listings',
+      'ebay_compare_listings',
+    ]) {
+      const tool = registry.get(name);
+      expect(tool.summary).toMatch(/mobile share link/i);
+      expect(JSON.stringify(tool.inputJsonSchema)).toContain('https://ebay.io/m/...');
+    }
+  });
+
   it('rejects duplicate tool names', () => {
     const duplicate = toolDefinitions[0] as unknown as ToolDefinition;
     expect(() => createToolRegistry([duplicate, duplicate])).toThrow(/Duplicate tool name/);

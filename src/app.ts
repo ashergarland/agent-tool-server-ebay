@@ -5,6 +5,7 @@ import {
 } from './compliance/ebay-account-deletion/index.js';
 import { loadConfig, type AppConfig } from './config/index.js';
 import { createEbayProvider } from './provider/ebay/index.js';
+import type { ItemReferenceResolver } from './provider/ebay/short-links.js';
 import type { EbayProvider } from './provider/types.js';
 import { createServices, type Services } from './services/index.js';
 import { createHttpServer } from './server/http.js';
@@ -27,6 +28,8 @@ export interface CreateApplicationOptions {
   readonly logger?: Logger;
   /** Injectable for tests; defaults to the real eBay Browse API adapter. */
   readonly provider?: EbayProvider;
+  /** Injectable for tests; defaults to the allowlisted eBay mobile-share resolver. */
+  readonly itemReferenceResolver?: ItemReferenceResolver;
   /** Injectable for tests; defaults to the configuration-derived compliance service. */
   readonly accountDeletion?: AccountDeletionService | undefined;
 }
@@ -58,7 +61,7 @@ export const createApplication = (options: CreateApplicationOptions = {}): Appli
   const config = options.config ?? loadConfig();
   const logger = options.logger ?? createLogger(config);
   const provider = options.provider ?? lazyProvider(config);
-  const services = createServices(config, provider, logger);
+  const services = createServices(config, provider, logger, options.itemReferenceResolver);
   const registry = createToolRegistry();
   const accountDeletion = options.accountDeletion ?? createAccountDeletionService(config);
 

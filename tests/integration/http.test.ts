@@ -2,6 +2,8 @@ import { afterAll, beforeAll, describe, expect, it, vi } from 'vitest';
 import type { Logger } from 'pino';
 import { createApplication, type Application } from '../../src/app.js';
 import { ItemGroupError } from '../../src/errors.js';
+import { EbayShortLinkResolver } from '../../src/provider/ebay/short-links.js';
+import type { FetchLike } from '../../src/provider/ebay/oauth.js';
 import { testConfig } from '../helpers/config.js';
 import {
   createFakeProvider,
@@ -157,6 +159,54 @@ describe('HTTP surface', () => {
       active: true,
       estimatedDeliveredTotal: { value: 102.49, currency: 'USD' },
     });
+  });
+
+  it('never forwards inbound connector credentials while resolving a mobile share link', async () => {
+    let outboundUrl: string | undefined;
+    let outboundInit: RequestInit | undefined;
+    const fetchImpl: FetchLike = (url, init) => {
+      outboundUrl = url;
+      outboundInit = init;
+      return Promise.resolve(
+        new Response('', {
+          status: 301,
+          headers: { location: 'https://www.ebay.com/itm/168601131927?mkevt=1&mkcid=16' },
+        }),
+      );
+    };
+    const isolated = createApplication({
+      config: testConfig({ AUTH_MODE: 'api-key', API_KEYS: API_KEY }),
+      logger: createTestLogger() as unknown as Logger,
+      provider: createFakeProvider(),
+      itemReferenceResolver: new EbayShortLinkResolver({ fetchImpl }),
+    });
+    await isolated.http.ready();
+
+    try {
+      const response = await isolated.http.inject({
+        method: 'POST',
+        url: '/tools/ebay_get_listing',
+        headers: {
+          ...auth,
+          'x-api-key': API_KEY,
+          cookie: 'caller-session=must-not-leave-the-connector',
+        },
+        payload: { item: 'https://ebay.io/m/tPMNkN' },
+      });
+
+      expect(response.statusCode).toBe(200);
+      expect(outboundUrl).toBe('https://ebay.io/m/tPMNkN');
+      expect(outboundInit?.credentials).toBe('omit');
+      expect(outboundInit?.redirect).toBe('manual');
+      const outboundHeaders = new Headers(outboundInit?.headers);
+      expect(outboundHeaders.has('authorization')).toBe(false);
+      expect(outboundHeaders.has('x-api-key')).toBe(false);
+      expect(outboundHeaders.has('cookie')).toBe(false);
+      expect(JSON.stringify(outboundInit)).not.toContain(API_KEY);
+      expect(JSON.stringify(outboundInit)).not.toContain('must-not-leave-the-connector');
+    } finally {
+      await isolated.http.close();
+    }
   });
 
   it('accepts both a bare payload and an { input } envelope', async () => {
