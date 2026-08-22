@@ -232,8 +232,9 @@ export const buildOpenApiDocument = (config: AppConfig, registry: ToolRegistry):
       description:
         'Read-only agent tool server that retrieves real eBay listings through the official eBay Browse ' +
         'API so that answers are grounded in the actual listing rather than a scraped web page. ' +
-        'Given an eBay URL or item id it returns normalised price, shipping, auction, condition, ' +
-        'seller, returns and item-specifics data, searches the live market, finds comparable ' +
+        'Given an eBay URL, eBay app mobile share link or item id it returns normalised price, ' +
+        'shipping, auction, condition, seller, returns and item-specifics data, searches the live ' +
+        'market, finds comparable ' +
         'active listings and compares several listings side by side. ' +
         'Important limitation: the eBay Browse API exposes **active listings only**. This ' +
         'connector cannot retrieve sold or completed prices, so all figures are asking prices ' +

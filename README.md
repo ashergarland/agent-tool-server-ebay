@@ -20,7 +20,7 @@ All tools are read-only and non-consequential:
 
 | Tool                         | Verified behavior                                                                          |
 | ---------------------------- | ------------------------------------------------------------------------------------------ |
-| `ebay_get_listing`           | Retrieves one listing by eBay URL, numeric item ID, or Browse API item ID.                 |
+| `ebay_get_listing`           | Retrieves one listing by eBay URL, mobile share link, numeric ID, or Browse API ID.        |
 | `ebay_get_item_group`        | Retrieves every purchasable variation of a multi-variation listing (item group).           |
 | `ebay_search_listings`       | Searches active listings with bounded keyword, category, seller, price, and other filters. |
 | `ebay_find_similar_listings` | Finds active comparables using EPID, GTIN, MPN, category, and title keywords when present. |
@@ -34,6 +34,9 @@ eBay uses two identifier spaces that are not interchangeable, and the server kee
   rewritten into a legacy lookup.
 - A numeric legacy ID (`407111131587`), including one parsed out of an `/itm/<id>` URL, is resolved
   through `getItemByLegacyId`.
+- Listing-oriented tools accept mobile share links copied from the eBay app, such as
+  `https://ebay.io/m/...`. The server resolves the allowlisted redirect and sends the resulting
+  `/itm/...` URL through the same listing-reference parser and Browse API flow as a normal URL.
 - A legacy ID can also identify an _item group_: a multi-variation listing. eBay reports this with
   structured error ID 11006 rather than returning an item. `ebay_get_listing` recognizes that error
   ID, resolves the group through `getItemsByItemGroup`, and answers with `kind: "itemGroup"` plus
@@ -132,6 +135,9 @@ Inbound caller authentication and outbound eBay credentials are separate:
 - `AUTH_MODE=disabled` is development-only and is rejected in production.
 - eBay uses OAuth client credentials from `EBAY_CLIENT_ID` and `EBAY_CLIENT_SECRET`; tokens are
   cached in memory, refreshed early, and never logged.
+- Mobile share links are resolved with manual redirects, a five-second timeout and a three-hop
+  limit. Only the observed `ebay.io` to `www.ebay.com` path is allowed; redirect requests omit
+  credentials and never carry connector keys, OAuth tokens, cookies or authorization headers.
 - The eBay account-deletion callback is deliberately unauthenticated by connector key — eBay cannot
   present one — and is authenticated instead by the `x-ebay-signature` it carries. It is a
   fixed two-operation surface on one path, is per-address rate limited, bounds its outbound eBay

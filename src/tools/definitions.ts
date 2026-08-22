@@ -43,8 +43,9 @@ const itemReference = z
   .max(2048)
   .describe(
     'An eBay listing URL (https://www.ebay.com/itm/407111131587, with or without an SEO slug or ' +
-      'query string, on any eBay country site), a bare numeric item id (407111131587), or a ' +
-      'Browse API item id (v1|407111131587|0).',
+      'query string, on any eBay country site), an eBay app mobile share link ' +
+      '(https://ebay.io/m/...), a bare numeric item id (407111131587), or a Browse API item id ' +
+      '(v1|407111131587|0).',
   );
 
 const marketplaceId = z
@@ -366,13 +367,14 @@ const itemGroupReferenceSchema = z.object({
 export const getListingTool = defineTool({
   name: 'ebay_get_listing',
   title: 'Get an eBay listing',
-  summary: 'Retrieve one real eBay listing by URL or item id via the official eBay Browse API.',
+  summary: 'Retrieve one eBay listing by item id, listing URL, or eBay app mobile share link.',
   description:
     'Fetches the authoritative, structured data for a single eBay listing: price, current bid, ' +
     'shipping cost and estimated delivered total, auction status and time remaining, condition ' +
     "and the seller's condition notes, seller feedback, return policy, quantity, category, item " +
-    'specifics and images. Use this whenever the user pastes an eBay link or item number — it ' +
-    'returns the actual listing from eBay, not a web page guess. If the id turns out to be a ' +
+    'specifics and images. Use this whenever the user pastes an eBay link or item number, ' +
+    'including an eBay app mobile share link such as https://ebay.io/m/... — it returns the ' +
+    'actual listing from eBay, not a web page guess. If the id turns out to be a ' +
     'multi-variation listing (an item group parent), the response reports kind="itemGroup" and ' +
     'carries the group with every purchasable variation instead of a single listing. Only ' +
     'active-listing data is available; the connector cannot retrieve sold or completed prices.',
@@ -438,7 +440,8 @@ export const getItemGroupTool = defineTool({
       .max(2048)
       .describe(
         'An eBay item group id (142373490668), the parent listing URL ' +
-          '(https://www.ebay.com/itm/142373490668), a Browse item id of one of the variations ' +
+          '(https://www.ebay.com/itm/142373490668), an eBay app mobile share link ' +
+          '(https://ebay.io/m/...), a Browse item id of one of the variations ' +
           '(v1|142373490668|623456789012), or an itemGroupHref containing item_group_id.',
       ),
     marketplaceId: marketplaceId.optional(),
@@ -563,9 +566,10 @@ export const searchListingsTool = defineTool({
 export const findSimilarListingsTool = defineTool({
   name: 'ebay_find_similar_listings',
   title: 'Find comparable active listings',
-  summary: 'Given one eBay listing, find comparable listings currently on the market.',
+  summary: 'Find active comparables from an eBay item id, listing URL, or mobile share link.',
   description:
-    'Takes an eBay listing URL or item id, derives a search strategy from that listing (its ' +
+    'Takes an eBay listing URL, eBay app mobile share link (https://ebay.io/m/...), or item id, ' +
+    'then derives a search strategy from that listing (its ' +
     'catalogue product id, GTIN or MPN where eBay has one, otherwise its distilled title ' +
     'keywords, category and identifying item specifics) and returns comparable **active** ' +
     'listings. Use it to establish what similar items are currently asking. The returned ' +
@@ -618,10 +622,11 @@ export const findSimilarListingsTool = defineTool({
 export const compareListingsTool = defineTool({
   name: 'ebay_compare_listings',
   title: 'Compare eBay listings',
-  summary: 'Fetch several eBay listings and report them side by side with their differences.',
+  summary: 'Compare eBay item ids, listing URLs, or mobile share links side by side.',
   description:
-    'Accepts two or more eBay listing URLs or item ids, fetches each one from the official ' +
-    'Browse API and returns a normalised side-by-side comparison: item price, shipping, ' +
+    'Accepts two or more eBay listing URLs, eBay app mobile share links such as ' +
+    'https://ebay.io/m/..., or item ids, fetches each one from the official Browse API and ' +
+    'returns a normalised side-by-side comparison: item price, shipping, ' +
     'estimated delivered total, condition and condition notes, buying format, bid count and ' +
     'auction end, seller reputation, return terms, location, item specifics and images, plus a ' +
     'plain-language list of what actually differs. The connector supplies data only and makes ' +
@@ -632,7 +637,7 @@ export const compareListingsTool = defineTool({
       .array(itemReference)
       .min(2)
       .max(20)
-      .describe('Two or more eBay listing URLs or item ids to compare.'),
+      .describe('Two or more eBay listing URLs, mobile share links, or item ids to compare.'),
     marketplaceId: marketplaceId.optional(),
   }),
   outputSchema: z.object({

@@ -12,6 +12,7 @@ import {
   parseItemGroupReference,
   parseItemReference,
   resolveMarketplace,
+  type ItemReferenceResolver,
   type ItemGroupReference,
   type ItemReference,
 } from '../provider/ebay/index.js';
@@ -84,6 +85,7 @@ export class ListingsService {
   public constructor(
     private readonly provider: EbayProvider,
     private readonly guardrails: Guardrails,
+    private readonly itemReferenceResolver: ItemReferenceResolver,
   ) {}
 
   /** Resolves a caller-supplied marketplace string, falling back to the pasted URL's site. */
@@ -108,7 +110,7 @@ export class ListingsService {
    * that want the group resolved for them should use {@link resolveItem}.
    */
   public async getListing(request: GetListingRequest): Promise<ResolvedListing> {
-    const { reference, marketplaceId } = this.resolveReference(request);
+    const { reference, marketplaceId } = await this.resolveReference(request);
     const listing = await this.provider.getListing(
       this.toGetListingInput(reference, marketplaceId),
     );
@@ -122,7 +124,7 @@ export class ListingsService {
    * an arbitrarily chosen one.
    */
   public async resolveItem(request: GetListingRequest): Promise<ResolvedItemReference> {
-    const { reference, marketplaceId } = this.resolveReference(request);
+    const { reference, marketplaceId } = await this.resolveReference(request);
 
     try {
       const listing = await this.provider.getListing(
@@ -142,11 +144,12 @@ export class ListingsService {
   }
 
   /** Parses the caller's item reference and settles the marketplace to query it on. */
-  private resolveReference(request: GetListingRequest): {
+  private async resolveReference(request: GetListingRequest): Promise<{
     reference: ItemReference;
     marketplaceId: MarketplaceId;
-  } {
-    const reference = parseItemReference(request.item);
+  }> {
+    const resolvedItem = await this.itemReferenceResolver.resolve(request.item);
+    const reference = parseItemReference(resolvedItem);
     if (reference.kind === 'product') {
       throw badRequest(
         'That URL is an eBay catalogue product page, not a single listing, so it has no price, ' +
@@ -180,7 +183,8 @@ export class ListingsService {
 
   /** Retrieves every purchasable variation of a multi-variation listing. */
   public async getItemGroup(request: GetItemGroupRequest): Promise<ResolvedItemGroup> {
-    const reference = parseItemGroupReference(request.itemGroup);
+    const resolvedItemGroup = await this.itemReferenceResolver.resolve(request.itemGroup);
+    const reference = parseItemGroupReference(resolvedItemGroup);
     const marketplaceId = this.resolveMarketplaceFor(request.marketplaceId, reference);
     const itemGroup = await this.provider.getItemGroup({
       marketplaceId,
