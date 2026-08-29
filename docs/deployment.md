@@ -60,13 +60,16 @@ From the repository root:
 read -rs EBAY_CLIENT_ID && export EBAY_CLIENT_ID
 read -rs EBAY_CLIENT_SECRET && export EBAY_CLIENT_SECRET
 
-./scripts/bootstrap/provision.sh <subscription-id> prod westus2 infra/parameters/prod.parameters.json
-./scripts/bootstrap/deploy.sh    <subscription-id> prod westus2 infra/parameters/prod.parameters.json
+PARAMETER_FILE=/absolute/path/to/operator-owned/ebay-prod.parameters.json
+./scripts/bootstrap/provision.sh <subscription-id> prod westus2 "$PARAMETER_FILE"
+./scripts/bootstrap/deploy.sh    <subscription-id> prod westus2 "$PARAMETER_FILE"
 ```
 
-The optional environment, location, and parameter file default to `prod`, `westus2`, and
-`infra/parameters/<environment>.parameters.json`. Environment names must be 2–10 characters and
-should contain only characters accepted by the generated Azure resource names.
+The scripts retain their `prod` and `westus2` environment and location defaults for compatibility,
+but the fourth argument is required. It must identify an external ARM parameter file maintained by
+the operator or live-state system. No repository-owned environment file is selected implicitly.
+Environment names must be 2–10 characters and should contain only characters accepted by the
+generated Azure resource names.
 
 Provisioning intentionally happens in multiple passes. The first pass creates the identity, registry,
 vault, logs, and role assignments. The script grants the current user `Key Vault Secrets Officer`,
@@ -88,11 +91,11 @@ nothing in the system could tell was fake. Placeholders are therefore never writ
 vault, under any combination of flags.
 
 A target counts as production when the environment is named `prod`-like **or** any parameter file
-that contributes to the deployment declares `ebayEnvironment: production` — the committed file and
-the operator overlay alike, since the overlay is layered last and wins at deploy time. All signals
-are consulted so an environment named something else, or a sandbox base that an overlay flips to
-the production keyset, cannot quietly opt out. An unreadable or malformed parameter file is treated
-as production, which is the direction that fails safe.
+that contributes to the deployment declares `ebayEnvironment: production` — the external base file
+and its adjacent overlay alike, since the overlay is layered last and wins at deploy time. All
+signals are consulted so an environment named something else, or a sandbox base that an overlay
+flips to the production keyset, cannot quietly opt out. An unreadable or malformed parameter file
+is treated as production, which is the direction that fails safe.
 
 Behaviour in full:
 
@@ -123,41 +126,46 @@ localhost.
 
 ## Deployment parameters
 
-`infra/parameters/<environment>.parameters.json` is the canonical, declarative source of environment
-configuration, and both scripts pass it to **every** `az deployment sub create`. This is what stops a
-routine release from silently reapplying a Bicep default for a setting an operator previously
-configured.
+Every real deployment must supply an explicit external ARM parameter file. The file maintained by
+the operator or private live-state system is authoritative for persistent desired state in that
+deployment, and both scripts pass it to **every** `az deployment sub create`. A missing path or file
+aborts before any Azure operation rather than silently falling back to Bicep defaults.
+
+The public repository owns reusable capability logic, Bicep, containers, bootstrap mechanics, the
+parameter contract, and capability-specific verification. It does not own an operator's production
+or development desired state.
 
 Precedence, lowest to highest:
 
 1. defaults declared in `infra/main.bicep`;
-2. `infra/parameters/<environment>.parameters.json` — committed, canonical, required. A missing file
-   aborts the deployment rather than falling back to defaults;
-3. `infra/parameters/<environment>.local.parameters.json` — optional, gitignored operator overlay,
-   applied after the committed file. Use it for account-specific values such as alert recipients;
+2. the explicit external deployment parameter file — operator-owned, authoritative, and required;
+3. an adjacent `<name>.local.parameters.json` file — optional caller-owned overlay applied after the
+   external file;
 4. release-specific values passed on the command line by the scripts: `image`, `publicBaseUrl`,
    `accountDeletionEndpointUrl`, and `deployApp`.
 
-The committed files pin `environmentName`, `location`, `ebayEnvironment`, `ebayMarketplaceId`,
-`ebayDeliveryCountry`, `ebayDeliveryPostalCode`, `logLevel`, `minReplicas`, `maxReplicas`,
-`enableHealthAlerts`, `alertEmails`, `alertSmsPhone`, `alertSmsCountryCode`, and `tags`.
+The existing `environmentName` and `location` command-line arguments also override matching file
+values so the operator explicitly selects the deployment target.
 
-Never commit alert addresses, phone numbers, subscription ids, tenant ids, or secrets. Secrets are
-not parameters at all: the connector API key, the eBay client id and secret, and the eBay
-account-deletion verification token live only in Key Vault and reach the Container App as managed
-secret references.
+[`../infra/parameters/example.parameters.json`](../infra/parameters/example.parameters.json)
+demonstrates the complete persistent parameter surface with generic sandbox-safe values. It is an
+example only, not real environment state. Do not add alert addresses, phone numbers, subscription
+ids, tenant ids, or secrets to public examples. Secrets are not parameters at all: the connector API
+key, the eBay client id and secret, and the eBay account-deletion verification token live only in
+Key Vault and reach the Container App as managed secret references.
 
 `tests/unit/deployment-parameters.test.ts` and `scripts/verify-parameter-resolution.sh` run in CI
-and fail if a new operator-facing parameter is added without being pinned in the environment files,
-if either script stops passing the parameter file, or if an account-specific value is committed.
+and fail if a new operator-facing parameter is missing from the safe example, if either script stops
+requiring and passing external input, or if an account-specific value appears in the example.
 
 To preview a configuration change before applying it:
 
 ```bash
+PARAMETER_FILE=/absolute/path/to/operator-owned/ebay-prod.parameters.json
 az deployment sub what-if \
   --location westus2 \
   --template-file infra/main.bicep \
-  --parameters @infra/parameters/prod.parameters.json
+  --parameters "@${PARAMETER_FILE}"
 ```
 
 ## Post-merge production activation runbook
@@ -185,7 +193,8 @@ aborts up front rather than writing a placeholder; see
 ### Step 2 — Provision Azure
 
 ```bash
-./scripts/bootstrap/provision.sh <subscription-id> prod westus2 infra/parameters/prod.parameters.json
+PARAMETER_FILE=/absolute/path/to/operator-owned/ebay-prod.parameters.json
+./scripts/bootstrap/provision.sh <subscription-id> prod westus2 "$PARAMETER_FILE"
 ```
 
 This creates or reuses the resource group, managed identity, container registry, Key Vault, Log
@@ -196,7 +205,7 @@ rotated, and an existing image is never rolled back to the placeholder.
 ### Step 3 — Deploy the real image
 
 ```bash
-./scripts/bootstrap/deploy.sh <subscription-id> prod westus2 infra/parameters/prod.parameters.json
+./scripts/bootstrap/deploy.sh <subscription-id> prod westus2 "$PARAMETER_FILE"
 ```
 
 The script reports the connector URL, `/health`, `/version`, `/openapi.json`, `/mcp`, the Marketplace
@@ -437,20 +446,20 @@ Before registration, verify that:
 ## Configure eBay behavior
 
 Change `ebayEnvironment`, `ebayMarketplaceId`, `ebayDeliveryCountry`, and `ebayDeliveryPostalCode`
-in `infra/parameters/<environment>.parameters.json` — not on the command line — so the setting
-persists across every subsequent release. Preview the change first:
+in the operator-owned external deployment parameter file — not in the public example or on the
+command line — so the setting persists across every subsequent release. Preview the change first:
 
 ```bash
 az deployment sub what-if \
   --location westus2 \
   --template-file infra/main.bicep \
-  --parameters @infra/parameters/prod.parameters.json
+  --parameters "@${PARAMETER_FILE}"
 ```
 
 Then apply it with a normal deployment:
 
 ```bash
-./scripts/bootstrap/deploy.sh <subscription-id> prod westus2
+./scripts/bootstrap/deploy.sh <subscription-id> prod westus2 "$PARAMETER_FILE"
 ```
 
 Buyer country and postal code improve calculated-shipping and delivered-total coverage. They are
@@ -463,7 +472,7 @@ configuration: it calls only eBay Browse API `GET` endpoints.
 
 ```bash
 git checkout <reviewed-commit>
-./scripts/bootstrap/deploy.sh <subscription-id> prod westus2
+./scripts/bootstrap/deploy.sh <subscription-id> prod westus2 "$PARAMETER_FILE"
 ```
 
 To roll back, check out a previously reviewed commit and run the same command. Each deployment
@@ -572,10 +581,9 @@ az containerapp logs show \
   --follow
 ```
 
-The Bicep template can create an availability test and action group. Set `enableHealthAlerts` to
-`true` and provide `alertEmails` or `alertSmsPhone` in the gitignored
-`infra/parameters/<environment>.local.parameters.json` overlay. Do not commit personal contact
-details to the tracked parameter files.
+The Bicep template can create an availability test and action group. The operator or live-state
+system owns `enableHealthAlerts` and any `alertEmails` or `alertSmsPhone` values in the external
+parameter file or its adjacent overlay. Do not add personal contact details to the public example.
 
 Monitor at least:
 
