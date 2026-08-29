@@ -1,6 +1,6 @@
 metadata description = '''
 Availability monitoring for the connector: an availability test that calls the public /health
-endpoint from outside Azure, an action group that emails and texts a single owner, and an alert
+endpoint from outside Azure, an action group that notifies configured recipients, and an alert
 that fires when the endpoint stops answering.
 
 This deliberately probes over HTTP rather than watching replica counts. The connector scales to

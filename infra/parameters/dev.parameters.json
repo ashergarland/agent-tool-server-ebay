@@ -2,9 +2,9 @@
   "$schema": "https://schema.management.azure.com/schemas/2019-04-01/deploymentParameters.json#",
   "contentVersion": "1.0.0.0",
   "_comment": [
-    "Canonical environment configuration for the dev deployment. See prod.parameters.json for the",
-    "rules about which values live here, which are supplied on the command line, and which are",
-    "Key Vault secrets."
+    "Portable, account-neutral baseline for a development deployment. It is an example/default, not",
+    "authoritative configuration for any particular operator. See prod.parameters.json for the rules",
+    "about external operator files, release-specific values, and Key Vault secrets."
   ],
   "parameters": {
     "environmentName": { "value": "dev" },

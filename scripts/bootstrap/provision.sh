@@ -7,8 +7,9 @@
 # Usage:
 #   ./scripts/bootstrap/provision.sh <subscription-id> [environment] [location] [parameter-file]
 #
-# The parameter file defaults to infra/parameters/<environment>.parameters.json and is the
-# canonical source of environment configuration; see scripts/bootstrap/common.sh for precedence.
+# The parameter file defaults to the portable baseline at
+# infra/parameters/<environment>.parameters.json. An external file supplied as argument 4 replaces
+# that baseline and is the authoritative operator configuration; see common.sh for precedence.
 #
 # Export EBAY_CLIENT_ID and EBAY_CLIENT_SECRET beforehand. They are required whenever the vault
 # does not already hold them and the target is eBay production; placeholder credentials are never

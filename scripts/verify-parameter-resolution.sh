@@ -2,10 +2,11 @@
 #
 # Hermetic behavioural checks for scripts/bootstrap/common.sh.
 #
-# The static assertions in tests/unit/deployment-parameters.test.ts prove the scripts *reference*
-# the canonical parameter file. This proves the shared behaviour itself: parameter resolution finds
-# the committed file, layers an operator overlay, honours an explicit file, and aborts on a missing
-# one; and `ensure_secret` writes only when a Key Vault secret is genuinely absent.
+# The static assertions in tests/unit/deployment-parameters.test.ts prove the scripts *reference* a
+# resolved parameter file. This proves the shared behaviour itself: parameter resolution finds the
+# committed portable baseline, layers an operator overlay, honours an explicit authoritative file,
+# and aborts on a missing one; and `ensure_secret` writes only when a Key Vault secret is genuinely
+# absent.
 #
 # Makes no Azure calls; the `az` CLI is stubbed. Run with: ./scripts/verify-parameter-resolution.sh
 

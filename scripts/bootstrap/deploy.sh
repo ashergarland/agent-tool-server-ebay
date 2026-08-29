@@ -6,10 +6,11 @@
 # Usage:
 #   ./scripts/bootstrap/deploy.sh <subscription-id> [environment] [location] [parameter-file]
 #
-# The parameter file defaults to infra/parameters/<environment>.parameters.json and is the
-# canonical source of environment configuration. Passing it on every deployment is what stops a
-# release from silently resetting the eBay environment, marketplace, delivery context, log level,
-# scaling or alerting settings back to their Bicep defaults.
+# The parameter file defaults to the portable baseline at
+# infra/parameters/<environment>.parameters.json. When argument 4 is supplied, that external file
+# replaces the baseline and is the authoritative operator configuration for this deployment.
+# Passing the selected file every time stops a release from silently resetting persistent settings
+# to their Bicep defaults.
 #
 # Requires: az CLI (logged in), git.
 
@@ -79,7 +80,7 @@ az acr build \
   --output none
 
 echo "==> Redeploying ${APP_NAME} with the new image"
-# The canonical parameter file comes first and the release-specific values override it, so every
+# The selected parameter file comes first and the release-specific values override it, so every
 # persistent environment setting survives the deployment exactly as configured.
 az deployment sub create \
   --name "chatgpt-ebay-${ENVIRONMENT}-$(date +%Y%m%d%H%M%S)" \

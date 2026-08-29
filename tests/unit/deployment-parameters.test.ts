@@ -10,7 +10,7 @@ import { describe, expect, it } from 'vitest';
  * environment, the marketplace, the buyer delivery context, the log level, scaling and alerting.
  *
  * These assertions make that regression impossible to reintroduce quietly. A new operator-facing
- * parameter must either be added to the committed environment parameter files or be explicitly
+ * parameter must either be added to the committed portable parameter baselines or be explicitly
  * declared here as a release-specific value that the scripts pass on the command line.
  */
 
@@ -23,7 +23,7 @@ const provisionScript = repoFile('scripts/bootstrap/provision.sh');
 const deployScript = repoFile('scripts/bootstrap/deploy.sh');
 const commonScript = repoFile('scripts/bootstrap/common.sh');
 
-const parameterFiles = {
+const portableParameterFiles = {
   prod: 'infra/parameters/prod.parameters.json',
   dev: 'infra/parameters/dev.parameters.json',
 } as const;
@@ -76,8 +76,8 @@ describe('infra/main.bicep parameters', () => {
     );
   });
 
-  it.each(Object.entries(parameterFiles))(
-    'pins every operator-configurable parameter in the %s environment file',
+  it.each(Object.entries(portableParameterFiles))(
+    'pins every operator-configurable parameter in the portable %s baseline',
     (_environment, relativePath) => {
       const configured = new Set(Object.keys(parameterFileValues(relativePath)));
       const missing = declared.filter(
@@ -88,8 +88,8 @@ describe('infra/main.bicep parameters', () => {
     },
   );
 
-  it.each(Object.entries(parameterFiles))(
-    'keeps release-specific values out of the %s environment file',
+  it.each(Object.entries(portableParameterFiles))(
+    'keeps release-specific values out of the portable %s baseline',
     (_environment, relativePath) => {
       const configured = Object.keys(parameterFileValues(relativePath));
       const leaked = configured.filter((name) => RELEASE_SPECIFIC_PARAMETERS.has(name));
@@ -98,8 +98,8 @@ describe('infra/main.bicep parameters', () => {
     },
   );
 
-  it.each(Object.entries(parameterFiles))(
-    'declares no parameter the template does not accept in the %s environment file',
+  it.each(Object.entries(portableParameterFiles))(
+    'declares no parameter the template does not accept in the portable %s baseline',
     (_environment, relativePath) => {
       const unknown = Object.keys(parameterFileValues(relativePath)).filter(
         (name) => !declared.includes(name),
@@ -109,8 +109,8 @@ describe('infra/main.bicep parameters', () => {
     },
   );
 
-  it.each(Object.entries(parameterFiles))(
-    'commits no account-specific value in the %s environment file',
+  it.each(Object.entries(portableParameterFiles))(
+    'commits no account-specific value in the portable %s baseline',
     (_environment, relativePath) => {
       const values = parameterFileValues(relativePath);
       const raw = repoFile(relativePath);
@@ -128,7 +128,7 @@ describe('infra/main.bicep parameters', () => {
 describe('bootstrap scripts', () => {
   const scripts = { 'provision.sh': provisionScript, 'deploy.sh': deployScript } as const;
 
-  it.each(Object.entries(scripts))('%s resolves the canonical parameter file', (_name, script) => {
+  it.each(Object.entries(scripts))('%s resolves the selected parameter file', (_name, script) => {
     expect(script).toContain('resolve_parameter_files');
     expect(script).toContain('source "${REPO_ROOT}/scripts/bootstrap/common.sh"');
   });

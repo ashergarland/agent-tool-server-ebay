@@ -296,23 +296,41 @@ optional availability monitoring. The identity receives only `AcrPull` on its re
 Vault secret-read access on its vault.
 
 ```bash
+# Use the committed portable baseline for a simple standalone deployment.
 EBAY_CLIENT_ID=... EBAY_CLIENT_SECRET=... \
   ./scripts/bootstrap/provision.sh <subscription-id> prod westus2 infra/parameters/prod.parameters.json
 ./scripts/bootstrap/deploy.sh <subscription-id> prod westus2 infra/parameters/prod.parameters.json
+
+# Or supply an operator-owned authoritative parameter file.
+./scripts/bootstrap/deploy.sh \
+  <subscription-id> \
+  prod \
+  westus2 \
+  /path/to/operator/prod.parameters.json
 ```
 
-The parameter file is optional on the command line — both scripts default to
-`infra/parameters/<environment>.parameters.json` — but it is never optional to the deployment.
-Every `az deployment sub create` in both scripts passes it, so a release cannot silently reapply a
-Bicep default for the eBay environment, marketplace, buyer delivery context, log level, replica
-scaling or alerting. Parameter precedence, lowest to highest:
+The fourth argument selects the base ARM deployment-parameter file. If omitted, both scripts use
+`infra/parameters/<environment>.parameters.json`, an account-neutral portable baseline for
+development or simple standalone deployments. If supplied, the external file replaces that
+baseline and is the authoritative operator configuration for the deployment. The scripts do not
+merge the committed baseline into an external file, so an operator file should explicitly set the
+complete persistent parameter surface.
+
+Every `az deployment sub create` in both scripts passes the selected file, so a release cannot
+silently reapply a Bicep default for the eBay environment, marketplace, buyer delivery context, log
+level, replica scaling or alerting. Parameter precedence, lowest to highest:
 
 1. defaults declared in `infra/main.bicep`;
-2. `infra/parameters/<environment>.parameters.json` — committed, canonical, required;
-3. `infra/parameters/<environment>.local.parameters.json` — gitignored operator overlay for
-   account-specific values such as alert recipients;
+2. the selected base parameter file — either the explicit authoritative operator file or the
+   committed portable baseline when argument 4 is omitted;
+3. an optional `.local.parameters.json` overlay adjacent to the selected base file (overlays in
+   this public repository are gitignored);
 4. release-specific command-line values: `image`, `publicBaseUrl`, `accountDeletionEndpointUrl`
    and `deployApp`.
+
+The committed files are examples/defaults, not authoritative configuration for any operator. Do
+not commit account-specific values such as subscription or tenant IDs, endpoints, alert recipients,
+or generated resource names to this public repository.
 
 Secrets never appear in any of these: the connector API key, the eBay client id and secret, and the
 eBay account-deletion verification token live only in Key Vault and reach the Container App as

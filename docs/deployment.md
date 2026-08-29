@@ -68,6 +68,19 @@ The optional environment, location, and parameter file default to `prod`, `westu
 `infra/parameters/<environment>.parameters.json`. Environment names must be 2–10 characters and
 should contain only characters accepted by the generated Azure resource names.
 
+The committed files are portable, account-neutral baselines for development or simple standalone
+deployments. An operator can instead make an external ARM parameter file authoritative:
+
+```bash
+./scripts/bootstrap/deploy.sh \
+  <subscription-id> \
+  prod \
+  westus2 \
+  /path/to/operator/prod.parameters.json
+```
+
+The external file replaces the committed baseline; it is not layered on top of it.
+
 Provisioning intentionally happens in multiple passes. The first pass creates the identity, registry,
 vault, logs, and role assignments. The script grants the current user `Key Vault Secrets Officer`,
 waits for propagation, and stores a generated connector API key, a generated eBay account-deletion
@@ -88,8 +101,8 @@ nothing in the system could tell was fake. Placeholders are therefore never writ
 vault, under any combination of flags.
 
 A target counts as production when the environment is named `prod`-like **or** any parameter file
-that contributes to the deployment declares `ebayEnvironment: production` — the committed file and
-the operator overlay alike, since the overlay is layered last and wins at deploy time. All signals
+that contributes to the deployment declares `ebayEnvironment: production` — the selected base file
+and an operator overlay alike, since the overlay is layered last and wins at deploy time. All signals
 are consulted so an environment named something else, or a sandbox base that an overlay flips to
 the production keyset, cannot quietly opt out. An unreadable or malformed parameter file is treated
 as production, which is the direction that fails safe.
@@ -123,33 +136,40 @@ localhost.
 
 ## Deployment parameters
 
-`infra/parameters/<environment>.parameters.json` is the canonical, declarative source of environment
-configuration, and both scripts pass it to **every** `az deployment sub create`. This is what stops a
-routine release from silently reapplying a Bicep default for a setting an operator previously
-configured.
+The fourth script argument selects the base ARM deployment-parameter file. When omitted, it defaults
+to `infra/parameters/<environment>.parameters.json`, a committed portable baseline/example. When an
+external file is supplied, that file replaces the baseline and is the authoritative operator state
+for the deployment. Both scripts pass the selected file to **every** `az deployment sub create`;
+this stops a routine release from silently reapplying a Bicep default for a persistent setting.
 
 Precedence, lowest to highest:
 
 1. defaults declared in `infra/main.bicep`;
-2. `infra/parameters/<environment>.parameters.json` — committed, canonical, required. A missing file
-   aborts the deployment rather than falling back to defaults;
-3. `infra/parameters/<environment>.local.parameters.json` — optional, gitignored operator overlay,
-   applied after the committed file. Use it for account-specific values such as alert recipients;
+2. the selected base parameter file — either the explicit authoritative operator file or the
+   committed baseline when argument 4 is omitted. A missing file aborts the deployment rather than
+   falling back to defaults;
+3. an optional `.local.parameters.json` overlay adjacent to the selected base file, applied after
+   it (overlays in this public repository are gitignored);
 4. release-specific values passed on the command line by the scripts: `image`, `publicBaseUrl`,
    `accountDeletionEndpointUrl`, and `deployApp`.
 
-The committed files pin `environmentName`, `location`, `ebayEnvironment`, `ebayMarketplaceId`,
+Because an external file replaces rather than extends the public baseline, it should explicitly set
+the complete persistent operator-controlled parameter surface. The committed baselines pin
+`environmentName`, `location`, `ebayEnvironment`, `ebayMarketplaceId`,
 `ebayDeliveryCountry`, `ebayDeliveryPostalCode`, `logLevel`, `minReplicas`, `maxReplicas`,
 `enableHealthAlerts`, `alertEmails`, `alertSmsPhone`, `alertSmsCountryCode`, and `tags`.
 
-Never commit alert addresses, phone numbers, subscription ids, tenant ids, or secrets. Secrets are
-not parameters at all: the connector API key, the eBay client id and secret, and the eBay
-account-deletion verification token live only in Key Vault and reach the Container App as managed
-secret references.
+The committed baselines are examples/defaults, not authoritative configuration for any particular
+operator. Never commit alert addresses, phone numbers, subscription IDs, tenant IDs, operator
+endpoints, or generated resource names to this public repository. Operators may keep non-secret
+account configuration in an external private parameter file. Secrets are not parameters at all:
+the connector API key, the eBay client id and secret, and the eBay account-deletion verification
+token live only in Key Vault and reach the Container App as managed secret references.
 
 `tests/unit/deployment-parameters.test.ts` and `scripts/verify-parameter-resolution.sh` run in CI
-and fail if a new operator-facing parameter is added without being pinned in the environment files,
-if either script stops passing the parameter file, or if an account-specific value is committed.
+and fail if a new operator-facing parameter is added without being pinned in the portable baselines,
+if either script stops passing the selected parameter file, or if an account-specific value is
+committed to those baselines.
 
 To preview a configuration change before applying it:
 

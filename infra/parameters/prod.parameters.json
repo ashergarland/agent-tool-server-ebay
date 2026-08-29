@@ -2,9 +2,13 @@
   "$schema": "https://schema.management.azure.com/schemas/2019-04-01/deploymentParameters.json#",
   "contentVersion": "1.0.0.0",
   "_comment": [
-    "Canonical environment configuration for the prod deployment. Both provision.sh and deploy.sh",
-    "pass this file to every az deployment, so a redeploy can never silently reapply a Bicep",
-    "default for a setting an operator configured here.",
+    "Portable, account-neutral baseline for a production-like deployment. It is useful for simple",
+    "standalone deployments, but it is not authoritative configuration for any particular operator.",
+    "When no external parameter file is supplied, provision.sh and deploy.sh pass this file to every",
+    "az deployment so a redeploy cannot silently reapply a Bicep default.",
+    "",
+    "An operator can supply an authoritative ARM parameter file as argument 4 to either script. That",
+    "file replaces this baseline and should explicitly set the complete persistent parameter surface.",
     "",
     "Deliberately absent because they are release-specific and supplied on the command line:",
     "  image, publicBaseUrl, accountDeletionEndpointUrl, deployApp.",
@@ -13,8 +17,8 @@
     "  the connector API key, the eBay client id and client secret, and the eBay marketplace",
     "  account deletion verification token.",
     "",
-    "Account-specific values such as alert recipients belong in the gitignored overlay",
-    "infra/parameters/prod.local.parameters.json, which is layered on top of this file."
+    "Do not commit account-specific values such as alert recipients here. Keep them in an external",
+    "operator-owned parameter file or a gitignored prod.local.parameters.json overlay."
   ],
   "parameters": {
     "environmentName": { "value": "prod" },
