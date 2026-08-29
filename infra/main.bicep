@@ -74,7 +74,7 @@ param deployApp bool = true
 @description('Deploy an availability test and alert that notify when the connector stops answering /health. Requires alertEmails or alertSmsPhone to be set, otherwise the alert would have nowhere to fire.')
 param enableHealthAlerts bool = false
 
-@description('Email addresses notified when the connector goes down. Supply at deployment time; do not commit personal addresses to a parameter file.')
+@description('Email addresses notified when the connector goes down. Do not add personal addresses to public example parameter files.')
 param alertEmails array = []
 
 @description('Phone number notified by SMS when the connector goes down, digits only.')

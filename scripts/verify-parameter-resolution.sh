@@ -3,9 +3,9 @@
 # Hermetic behavioural checks for scripts/bootstrap/common.sh.
 #
 # The static assertions in tests/unit/deployment-parameters.test.ts prove the scripts *reference*
-# the canonical parameter file. This proves the shared behaviour itself: parameter resolution finds
-# the committed file, layers an operator overlay, honours an explicit file, and aborts on a missing
-# one; and `ensure_secret` writes only when a Key Vault secret is genuinely absent.
+# an external parameter file. This proves the shared behaviour itself: parameter resolution requires
+# explicit operator input, layers an adjacent overlay, and aborts on missing input; and
+# `ensure_secret` writes only when a Key Vault secret is genuinely absent.
 #
 # Makes no Azure calls; the `az` CLI is stubbed. Run with: ./scripts/verify-parameter-resolution.sh
 
@@ -16,6 +16,16 @@ REPO_ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 source "${REPO_ROOT}/scripts/bootstrap/common.sh"
 
 failures=0
+WORK_DIR="$(mktemp -d)"
+trap 'rm -rf "${WORK_DIR}"' EXIT
+
+PARAMETER_DIR="${WORK_DIR}/parameters"
+mkdir -p "${PARAMETER_DIR}"
+EXTERNAL_PARAMETER_FILE="${PARAMETER_DIR}/operator.parameters.json"
+PRODUCTION_PARAMETER_FILE="${PARAMETER_DIR}/production.parameters.json"
+cp "${REPO_ROOT}/infra/parameters/example.parameters.json" "${EXTERNAL_PARAMETER_FILE}"
+printf '{"parameters":{"ebayEnvironment":{"value":"production"}}}\n' \
+  >"${PRODUCTION_PARAMETER_FILE}"
 
 assert_equals() {
   local label="$1" expected="$2" actual="$3"
@@ -29,40 +39,61 @@ assert_equals() {
   fi
 }
 
-echo "==> resolves the committed environment file by default"
-for environment in prod dev; do
-  resolve_parameter_files "${REPO_ROOT}" "${environment}" ''
-  assert_equals "${environment} base file" \
-    "${REPO_ROOT}/infra/parameters/${environment}.parameters.json" "${PARAMETER_FILE}"
-  assert_equals "${environment} argument list" \
-    "--parameters @${REPO_ROOT}/infra/parameters/${environment}.parameters.json" \
-    "${PARAMETER_ARGS[*]}"
-  assert_equals "${environment} has no overlay" '' "${PARAMETER_OVERLAY}"
-done
-
-echo "==> layers a gitignored operator overlay after the committed file"
-OVERLAY="${REPO_ROOT}/infra/parameters/prod.local.parameters.json"
-if [[ -e "${OVERLAY}" ]]; then
-  echo "  skip: ${OVERLAY} already exists; not overwriting an operator file"
+echo "==> requires an explicit external parameter file"
+if missing_input="$(resolve_parameter_files '' 2>&1)"; then
+  echo "  FAIL missing external input did not abort" >&2
+  failures=$((failures + 1))
 else
-  printf '{"parameters":{"alertEmails":{"value":[]}}}\n' >"${OVERLAY}"
-  trap 'rm -f "${OVERLAY}"' EXIT
-  resolve_parameter_files "${REPO_ROOT}" prod ''
-  assert_equals 'overlay is applied last' \
-    "--parameters @${REPO_ROOT}/infra/parameters/prod.parameters.json --parameters @${OVERLAY}" \
-    "${PARAMETER_ARGS[*]}"
-  assert_equals 'overlay is ignored by git' '' "$(git -C "${REPO_ROOT}" ls-files "${OVERLAY}")"
-  rm -f "${OVERLAY}"
-  trap - EXIT
+  case "${missing_input}" in
+    *'External deployment parameter file is required as the fourth argument.'*)
+      echo "  ok   missing external input aborts with an actionable message"
+      ;;
+    *)
+      echo "  FAIL missing external input produced the wrong error" >&2
+      failures=$((failures + 1))
+      ;;
+  esac
 fi
 
-echo "==> honours an explicitly supplied parameter file"
-resolve_parameter_files "${REPO_ROOT}" prod "${REPO_ROOT}/infra/parameters/dev.parameters.json"
+echo "==> bootstrap entry points fail before Azure when external input is omitted"
+for bootstrap_script in provision.sh deploy.sh; do
+  if bootstrap_output="$(
+    bash "${REPO_ROOT}/scripts/bootstrap/${bootstrap_script}" test-subscription prod westus2 2>&1
+  )"; then
+    echo "  FAIL ${bootstrap_script} continued without external parameters" >&2
+    failures=$((failures + 1))
+  else
+    case "${bootstrap_output}" in
+      *'External deployment parameter file is required as the fourth argument.'*)
+        echo "  ok   ${bootstrap_script} fails closed before Azure"
+        ;;
+      *)
+        echo "  FAIL ${bootstrap_script} produced the wrong error" >&2
+        failures=$((failures + 1))
+        ;;
+    esac
+  fi
+done
+
+echo "==> honours the explicitly supplied external parameter file"
+resolve_parameter_files "${EXTERNAL_PARAMETER_FILE}"
 assert_equals 'explicit file wins' \
-  "${REPO_ROOT}/infra/parameters/dev.parameters.json" "${PARAMETER_FILE}"
+  "${EXTERNAL_PARAMETER_FILE}" "${PARAMETER_FILE}"
+assert_equals 'explicit argument list' \
+  "--parameters @${EXTERNAL_PARAMETER_FILE}" "${PARAMETER_ARGS[*]}"
+assert_equals 'explicit file has no overlay' '' "${PARAMETER_OVERLAY}"
+
+echo "==> layers a caller-owned adjacent overlay after the external file"
+OVERLAY="${EXTERNAL_PARAMETER_FILE%.parameters.json}.local.parameters.json"
+printf '{"parameters":{"alertEmails":{"value":[]}}}\n' >"${OVERLAY}"
+resolve_parameter_files "${EXTERNAL_PARAMETER_FILE}"
+assert_equals 'overlay is applied last' \
+  "--parameters @${EXTERNAL_PARAMETER_FILE} --parameters @${OVERLAY}" \
+  "${PARAMETER_ARGS[*]}"
+rm -f "${OVERLAY}"
 
 echo "==> aborts when the parameter file is missing"
-if (resolve_parameter_files "${REPO_ROOT}" nonexistent-environment '' 2>/dev/null); then
+if (resolve_parameter_files "${PARAMETER_DIR}/missing.parameters.json" 2>/dev/null); then
   echo "  FAIL a missing parameter file did not abort" >&2
   failures=$((failures + 1))
 else
@@ -81,8 +112,7 @@ fi
 # AZ_SHOW_BEHAVIOUR, so a test can make one credential present and the other absent. Every write is
 # logged with its value so assertions can prove exactly what would have been stored.
 
-STUB_DIR="$(mktemp -d)"
-trap 'rm -rf "${STUB_DIR}"' EXIT
+STUB_DIR="${WORK_DIR}/az-stub"
 mkdir -p "${STUB_DIR}/behaviour"
 cat >"${STUB_DIR}/az" <<'STUB'
 #!/usr/bin/env bash
@@ -175,13 +205,13 @@ done
 export AZ_SHOW_BEHAVIOUR=missing
 
 echo "==> targets_ebay_production classifies deployments correctly"
-if targets_ebay_production prod "${REPO_ROOT}/infra/parameters/prod.parameters.json"; then
+if targets_ebay_production prod "${PRODUCTION_PARAMETER_FILE}"; then
   echo "  ok   prod + production parameter file is a production target"
 else
   echo "  FAIL prod was not treated as production" >&2
   failures=$((failures + 1))
 fi
-if targets_ebay_production dev "${REPO_ROOT}/infra/parameters/dev.parameters.json"; then
+if targets_ebay_production dev "${EXTERNAL_PARAMETER_FILE}"; then
   echo "  FAIL dev + sandbox parameter file was treated as production" >&2
   failures=$((failures + 1))
 else
@@ -189,7 +219,7 @@ else
 fi
 # An environment named something other than prod must not opt out of the check while still
 # pointing at the production eBay keyset.
-if targets_ebay_production staging "${REPO_ROOT}/infra/parameters/prod.parameters.json"; then
+if targets_ebay_production staging "${PRODUCTION_PARAMETER_FILE}"; then
   echo "  ok   a non-prod name still counts as production when the keyset is production"
 else
   echo "  FAIL a production keyset escaped the check via its environment name" >&2
@@ -197,7 +227,7 @@ else
 fi
 # Case must not be a way out either: "PROD" with a sandbox parameter file would otherwise be
 # classified by the file alone.
-if targets_ebay_production PROD "${REPO_ROOT}/infra/parameters/dev.parameters.json"; then
+if targets_ebay_production PROD "${EXTERNAL_PARAMETER_FILE}"; then
   echo "  ok   an upper-case environment name is still production"
 else
   echo "  FAIL an upper-case environment name escaped the name check" >&2
@@ -222,7 +252,7 @@ fi
 # overlay flips to the production keyset must be classified as production, or that deployment
 # would be eligible for placeholder credentials against the real eBay keyset.
 printf '{"parameters":{"ebayEnvironment":{"value":"production"}}}' >"${STUB_DIR}/overlay-prod.json"
-if targets_ebay_production staging "${REPO_ROOT}/infra/parameters/dev.parameters.json" \
+if targets_ebay_production staging "${EXTERNAL_PARAMETER_FILE}" \
   "${STUB_DIR}/overlay-prod.json"; then
   echo "  ok   an overlay that selects the production keyset wins"
 else
@@ -230,7 +260,7 @@ else
   failures=$((failures + 1))
 fi
 # An empty overlay argument is the normal case and must not change the verdict.
-if targets_ebay_production staging "${REPO_ROOT}/infra/parameters/dev.parameters.json" ''; then
+if targets_ebay_production staging "${EXTERNAL_PARAMETER_FILE}" ''; then
   echo "  FAIL an empty overlay argument was treated as production" >&2
   failures=$((failures + 1))
 else

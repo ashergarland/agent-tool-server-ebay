@@ -2,14 +2,13 @@
 #
 # Shared deployment plumbing for provision.sh and deploy.sh.
 #
-# Both scripts deploy the *same* template with the *same* canonical environment configuration, so
-# that a redeploy can never silently reapply a Bicep default for a setting an operator configured.
+# Both scripts deploy the *same* template with the same operator-supplied desired state, so that a
+# redeploy can never silently reapply a Bicep default for a setting an operator configured.
 #
 # Parameter precedence, lowest to highest:
 #   1. defaults declared in infra/main.bicep
-#   2. infra/parameters/<environment>.parameters.json      (committed, canonical, required)
-#   3. infra/parameters/<environment>.local.parameters.json (gitignored, optional overlay for
-#      account-specific values such as alert recipients)
+#   2. explicit external deployment parameter file (operator-owned, authoritative, required)
+#   3. adjacent <name>.local.parameters.json (optional caller-owned overlay)
 #   4. release-specific values passed on the command line: image, publicBaseUrl,
 #      accountDeletionEndpointUrl, deployApp
 #
@@ -26,17 +25,21 @@ SECRET_ACCOUNT_DELETION_TOKEN='ebay-account-deletion-token'
 # accountDeletionCallbackUrl output in infra/main.bicep.
 ACCOUNT_DELETION_PATH='/ebay/notifications/marketplace-account-deletion'
 
-# Resolves the canonical parameter file and its optional operator overlay for an environment.
+# Resolves the required external deployment parameter file and its optional adjacent overlay.
 # Populates the PARAMETER_ARGS array with the --parameters arguments to pass to az.
 resolve_parameter_files() {
-  local repo_root="$1"
-  local environment="$2"
-  local explicit="${3:-}"
+  local explicit="${1:-}"
 
-  local base="${explicit:-${repo_root}/infra/parameters/${environment}.parameters.json}"
+  if [[ -z "${explicit}" ]]; then
+    echo "External deployment parameter file is required as the fourth argument." >&2
+    echo "Pass an operator-owned ARM parameter file; public examples are not live desired state." >&2
+    exit 1
+  fi
+
+  local base="${explicit}"
   if [[ ! -f "${base}" ]]; then
-    echo "Parameter file not found: ${base}" >&2
-    echo "Every deployment must supply one so environment settings are never reset to Bicep defaults." >&2
+    echo "External deployment parameter file not found: ${base}" >&2
+    echo "Verify the fourth argument points to an existing ARM parameter file." >&2
     exit 1
   fi
 

@@ -10,6 +10,5 @@ coverage/
 .idea/
 openapi.json
 
-# Operator-owned deployment overlays holding account-specific values such as alert recipients.
-# The committed infra/parameters/<env>.parameters.json files must stay free of them.
+# Optional caller-owned deployment overlays must remain untracked.
 infra/parameters/*.local.parameters.json

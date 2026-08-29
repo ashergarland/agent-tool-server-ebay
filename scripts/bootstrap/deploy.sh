@@ -4,18 +4,17 @@
 # pointing at the new tag.
 #
 # Usage:
-#   ./scripts/bootstrap/deploy.sh <subscription-id> [environment] [location] [parameter-file]
+#   ./scripts/bootstrap/deploy.sh <subscription-id> <environment> <location> <parameter-file>
 #
-# The parameter file defaults to infra/parameters/<environment>.parameters.json and is the
-# canonical source of environment configuration. Passing it on every deployment is what stops a
-# release from silently resetting the eBay environment, marketplace, delivery context, log level,
-# scaling or alerting settings back to their Bicep defaults.
+# The fourth argument is required and is authoritative for persistent operator-owned desired state.
+# Passing it on every deployment stops a release from silently resetting the eBay environment,
+# marketplace, delivery context, log level, scaling or alerting settings back to Bicep defaults.
 #
 # Requires: az CLI (logged in), git.
 
 set -euo pipefail
 
-SUBSCRIPTION_ID="${1:?usage: deploy.sh <subscription-id> [environment] [location] [parameter-file]}"
+SUBSCRIPTION_ID="${1:?usage: deploy.sh <subscription-id> <environment> <location> <parameter-file>}"
 ENVIRONMENT="${2:-prod}"
 LOCATION="${3:-westus2}"
 PARAMETER_FILE_ARG="${4:-}"
@@ -26,9 +25,9 @@ TAG="$(git -C "${REPO_ROOT}" rev-parse --short HEAD)"
 
 # shellcheck source=scripts/bootstrap/common.sh
 source "${REPO_ROOT}/scripts/bootstrap/common.sh"
-resolve_parameter_files "${REPO_ROOT}" "${ENVIRONMENT}" "${PARAMETER_FILE_ARG}"
+resolve_parameter_files "${PARAMETER_FILE_ARG}"
 
-echo "==> Environment configuration ${PARAMETER_FILE}"
+echo "==> External deployment parameters ${PARAMETER_FILE}"
 if [[ -n "${PARAMETER_OVERLAY}" ]]; then
   echo "==> Operator overlay ${PARAMETER_OVERLAY}"
 fi
@@ -61,7 +60,7 @@ KEY_VAULT="$(az keyvault list --resource-group "${RESOURCE_GROUP}" --query '[0].
 if [[ -z "${KEY_VAULT}" ]] || ! az keyvault secret show \
   --vault-name "${KEY_VAULT}" --name "${SECRET_ACCOUNT_DELETION_TOKEN}" --output none 2>/dev/null; then
   echo "Key Vault secret ${SECRET_ACCOUNT_DELETION_TOKEN} is missing from ${KEY_VAULT:-<no vault>}." >&2
-  echo "Run ./scripts/bootstrap/provision.sh ${SUBSCRIPTION_ID} ${ENVIRONMENT} ${LOCATION} to create it;" >&2
+  echo "Run ./scripts/bootstrap/provision.sh ${SUBSCRIPTION_ID} ${ENVIRONMENT} ${LOCATION} ${PARAMETER_FILE} to create it;" >&2
   echo "existing secrets are never rotated by provisioning." >&2
   exit 1
 fi
@@ -79,8 +78,8 @@ az acr build \
   --output none
 
 echo "==> Redeploying ${APP_NAME} with the new image"
-# The canonical parameter file comes first and the release-specific values override it, so every
-# persistent environment setting survives the deployment exactly as configured.
+# Operator-owned parameters come first and release-specific values override them, so every
+# persistent environment setting survives the deployment exactly as configured by the caller.
 az deployment sub create \
   --name "chatgpt-ebay-${ENVIRONMENT}-$(date +%Y%m%d%H%M%S)" \
   --location "${LOCATION}" \

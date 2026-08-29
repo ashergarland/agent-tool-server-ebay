@@ -5,10 +5,10 @@
 # token in Key Vault, and seeds the eBay credentials.
 #
 # Usage:
-#   ./scripts/bootstrap/provision.sh <subscription-id> [environment] [location] [parameter-file]
+#   ./scripts/bootstrap/provision.sh <subscription-id> <environment> <location> <parameter-file>
 #
-# The parameter file defaults to infra/parameters/<environment>.parameters.json and is the
-# canonical source of environment configuration; see scripts/bootstrap/common.sh for precedence.
+# The fourth argument is required. It is the operator-owned source of desired state for this
+# deployment; see scripts/bootstrap/common.sh for precedence.
 #
 # Export EBAY_CLIENT_ID and EBAY_CLIENT_SECRET beforehand. They are required whenever the vault
 # does not already hold them and the target is eBay production; placeholder credentials are never
@@ -22,7 +22,7 @@
 
 set -euo pipefail
 
-SUBSCRIPTION_ID="${1:?usage: provision.sh <subscription-id> [environment] [location] [parameter-file]}"
+SUBSCRIPTION_ID="${1:?usage: provision.sh <subscription-id> <environment> <location> <parameter-file>}"
 ENVIRONMENT="${2:-prod}"
 LOCATION="${3:-westus2}"
 PARAMETER_FILE_ARG="${4:-}"
@@ -32,10 +32,10 @@ STAMP="$(date +%Y%m%d%H%M%S)"
 
 # shellcheck source=scripts/bootstrap/common.sh
 source "${REPO_ROOT}/scripts/bootstrap/common.sh"
-resolve_parameter_files "${REPO_ROOT}" "${ENVIRONMENT}" "${PARAMETER_FILE_ARG}"
+resolve_parameter_files "${PARAMETER_FILE_ARG}"
 
 echo "==> Using subscription ${SUBSCRIPTION_ID}"
-echo "==> Environment configuration ${PARAMETER_FILE}"
+echo "==> External deployment parameters ${PARAMETER_FILE}"
 if [[ -n "${PARAMETER_OVERLAY}" ]]; then
   echo "==> Operator overlay ${PARAMETER_OVERLAY}"
 fi

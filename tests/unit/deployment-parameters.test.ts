@@ -1,4 +1,4 @@
-import { readFileSync } from 'node:fs';
+import { existsSync, readFileSync } from 'node:fs';
 import { fileURLToPath } from 'node:url';
 import { describe, expect, it } from 'vitest';
 
@@ -10,8 +10,8 @@ import { describe, expect, it } from 'vitest';
  * environment, the marketplace, the buyer delivery context, the log level, scaling and alerting.
  *
  * These assertions make that regression impossible to reintroduce quietly. A new operator-facing
- * parameter must either be added to the committed environment parameter files or be explicitly
- * declared here as a release-specific value that the scripts pass on the command line.
+ * parameter must either be demonstrated in the safe public example or be explicitly declared here
+ * as a release-specific value that the scripts pass on the command line.
  */
 
 const repoFile = (relativePath: string): string =>
@@ -23,13 +23,12 @@ const provisionScript = repoFile('scripts/bootstrap/provision.sh');
 const deployScript = repoFile('scripts/bootstrap/deploy.sh');
 const commonScript = repoFile('scripts/bootstrap/common.sh');
 
-const parameterFiles = {
-  prod: 'infra/parameters/prod.parameters.json',
-  dev: 'infra/parameters/dev.parameters.json',
+const exampleParameterFiles = {
+  sandbox: 'infra/parameters/example.parameters.json',
 } as const;
 
 /**
- * Parameters that must NOT live in a committed environment file.
+ * Parameters that must NOT live in an operator-owned persistent parameter file or public example.
  *
  * `image`, `publicBaseUrl` and `accountDeletionEndpointUrl` are derived per release from the Git
  * commit and the Container Apps ingress hostname; `deployApp` and `resourceGroupName` are
@@ -76,9 +75,9 @@ describe('infra/main.bicep parameters', () => {
     );
   });
 
-  it.each(Object.entries(parameterFiles))(
-    'pins every operator-configurable parameter in the %s environment file',
-    (_environment, relativePath) => {
+  it.each(Object.entries(exampleParameterFiles))(
+    'demonstrates every operator-configurable parameter in the %s example',
+    (_example, relativePath) => {
       const configured = new Set(Object.keys(parameterFileValues(relativePath)));
       const missing = declared.filter(
         (name) => !RELEASE_SPECIFIC_PARAMETERS.has(name) && !configured.has(name),
@@ -88,9 +87,9 @@ describe('infra/main.bicep parameters', () => {
     },
   );
 
-  it.each(Object.entries(parameterFiles))(
-    'keeps release-specific values out of the %s environment file',
-    (_environment, relativePath) => {
+  it.each(Object.entries(exampleParameterFiles))(
+    'keeps release-specific values out of the %s example',
+    (_example, relativePath) => {
       const configured = Object.keys(parameterFileValues(relativePath));
       const leaked = configured.filter((name) => RELEASE_SPECIFIC_PARAMETERS.has(name));
 
@@ -98,9 +97,9 @@ describe('infra/main.bicep parameters', () => {
     },
   );
 
-  it.each(Object.entries(parameterFiles))(
-    'declares no parameter the template does not accept in the %s environment file',
-    (_environment, relativePath) => {
+  it.each(Object.entries(exampleParameterFiles))(
+    'declares no parameter the template does not accept in the %s example',
+    (_example, relativePath) => {
       const unknown = Object.keys(parameterFileValues(relativePath)).filter(
         (name) => !declared.includes(name),
       );
@@ -109,18 +108,38 @@ describe('infra/main.bicep parameters', () => {
     },
   );
 
-  it.each(Object.entries(parameterFiles))(
-    'commits no account-specific value in the %s environment file',
-    (_environment, relativePath) => {
+  it('does not publish production or development desired-state files', () => {
+    expect(
+      existsSync(
+        fileURLToPath(new URL('../../infra/parameters/prod.parameters.json', import.meta.url)),
+      ),
+    ).toBe(false);
+    expect(
+      existsSync(
+        fileURLToPath(new URL('../../infra/parameters/dev.parameters.json', import.meta.url)),
+      ),
+    ).toBe(false);
+  });
+
+  it.each(Object.entries(exampleParameterFiles))(
+    'labels the %s file as a safe example and commits no account-specific value',
+    (_example, relativePath) => {
       const values = parameterFileValues(relativePath);
       const raw = repoFile(relativePath);
 
+      expect(raw).toContain('SAFE EXAMPLE ONLY');
+      expect(values['environmentName']).toEqual({ value: 'example' });
+      expect(values['ebayEnvironment']).toEqual({ value: 'sandbox' });
       expect(values['alertEmails']).toEqual({ value: [] });
       expect(values['alertSmsPhone']).toEqual({ value: '' });
       // Subscription and tenant identifiers, e-mail addresses and long random strings that could
-      // be a credential must never appear in a committed parameter file.
+      // be a credential must never appear in a public example.
       expect(raw).not.toMatch(/[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}/i);
       expect(raw).not.toMatch(/[A-Za-z0-9._%+-]+@[A-Za-z0-9.-]+\.[A-Za-z]{2,}/);
+      const secretParameters = Object.keys(values).filter((name) =>
+        /secret|token|credential|clientId/i.test(name),
+      );
+      expect(secretParameters).toEqual([]);
     },
   );
 });
@@ -128,7 +147,7 @@ describe('infra/main.bicep parameters', () => {
 describe('bootstrap scripts', () => {
   const scripts = { 'provision.sh': provisionScript, 'deploy.sh': deployScript } as const;
 
-  it.each(Object.entries(scripts))('%s resolves the canonical parameter file', (_name, script) => {
+  it.each(Object.entries(scripts))('%s resolves the external parameter file', (_name, script) => {
     expect(script).toContain('resolve_parameter_files');
     expect(script).toContain('source "${REPO_ROOT}/scripts/bootstrap/common.sh"');
   });
@@ -146,18 +165,22 @@ describe('bootstrap scripts', () => {
     },
   );
 
-  it('accepts an operator-supplied parameter file as the fourth argument', () => {
+  it('requires an operator-supplied parameter file as the fourth argument', () => {
     expect(provisionScript).toContain('PARAMETER_FILE_ARG="${4:-}"');
     expect(deployScript).toContain('PARAMETER_FILE_ARG="${4:-}"');
+    expect(commonScript).toContain(
+      'External deployment parameter file is required as the fourth argument.',
+    );
   });
 
-  it('defaults to the committed per-environment file and layers a gitignored overlay', () => {
-    expect(commonScript).toContain('infra/parameters/${environment}.parameters.json');
+  it('never falls back to a public environment file and still layers an adjacent overlay', () => {
+    expect(commonScript).not.toContain('infra/parameters/${environment}.parameters.json');
+    expect(commonScript).toContain('local base="${explicit}"');
     expect(commonScript).toContain('.local.parameters.json');
   });
 
   it('fails loudly when the parameter file is missing rather than deploying defaults', () => {
-    expect(commonScript).toContain('Parameter file not found');
+    expect(commonScript).toContain('External deployment parameter file not found');
     expect(commonScript).toMatch(/exit 1/);
   });
 
