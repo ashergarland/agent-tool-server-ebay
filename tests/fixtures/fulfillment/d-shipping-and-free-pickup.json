@@ -1,0 +1,46 @@
+{
+  "itemId": "v1|100000000004|0",
+  "title": "Shipping plus free local pickup",
+  "price": {
+    "value": "2.22",
+    "currency": "USD"
+  },
+  "shippingOptions": [
+    {
+      "shippingServiceCode": "USPS Ground Advantage",
+      "type": "USPS Ground Advantage",
+      "shippingCarrierCode": "USPS",
+      "shippingCostType": "FIXED",
+      "shippingCost": {
+        "value": "5.48",
+        "currency": "USD"
+      },
+      "minEstimatedDeliveryDate": "2026-09-07T07:00:00.000Z",
+      "maxEstimatedDeliveryDate": "2026-09-09T07:00:00.000Z"
+    },
+    {
+      "shippingServiceCode": "Local Pickup",
+      "type": "Local Pickup",
+      "shippingCostType": "FIXED",
+      "shippingCost": {
+        "value": "0.00",
+        "currency": "USD"
+      }
+    }
+  ],
+  "estimatedAvailabilities": [
+    {
+      "estimatedAvailabilityStatus": "IN_STOCK",
+      "deliveryOptions": ["SHIP_TO_HOME", "SELLER_ARRANGED_LOCAL_PICKUP"]
+    }
+  ],
+  "shipToLocations": {
+    "regionIncluded": [
+      {
+        "regionName": "United States",
+        "regionId": "US",
+        "regionType": "COUNTRY"
+      }
+    ]
+  }
+}

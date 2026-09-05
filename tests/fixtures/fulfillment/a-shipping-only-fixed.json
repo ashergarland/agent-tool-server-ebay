@@ -1,0 +1,28 @@
+{
+  "itemId": "v1|100000000001|0",
+  "title": "Fixed paid shipping only",
+  "price": {
+    "value": "24.99",
+    "currency": "USD"
+  },
+  "shippingOptions": [
+    {
+      "shippingServiceCode": "USPS Ground Advantage",
+      "type": "USPS Ground Advantage",
+      "shippingCarrierCode": "USPS",
+      "shippingCostType": "FIXED",
+      "shippingCost": {
+        "value": "6.50",
+        "currency": "USD"
+      },
+      "minEstimatedDeliveryDate": "2026-09-08T07:00:00.000Z",
+      "maxEstimatedDeliveryDate": "2026-09-11T07:00:00.000Z"
+    }
+  ],
+  "estimatedAvailabilities": [
+    {
+      "estimatedAvailabilityStatus": "IN_STOCK",
+      "deliveryOptions": ["SHIP_TO_HOME"]
+    }
+  ]
+}

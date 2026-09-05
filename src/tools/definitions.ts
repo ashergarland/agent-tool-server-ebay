@@ -95,6 +95,22 @@ const countryCode = z
   .regex(/^[A-Za-z]{2}$/, 'must be a two letter ISO 3166 country code')
   .describe('Two letter ISO 3166 country code, e.g. US or GB.');
 
+const postalCodeInput = z
+  .string()
+  .max(20)
+  .describe('Buyer postal code; improves shipping-cost accuracy. Requires deliveryCountry.');
+
+/** Buyer destination inputs, shared by every tool that reads shipping data. */
+const destinationInputShape = {
+  deliveryCountry: countryCode
+    .optional()
+    .describe(
+      'Country the buyer wants delivery to. eBay quotes calculated shipping and delivery ' +
+        'estimates for this destination.',
+    ),
+  deliveryPostalCode: postalCodeInput.optional(),
+};
+
 /* ----------------------------------------------------------- output schemas */
 
 const moneySchema = z
@@ -131,6 +147,79 @@ const shippingOptionSchema = z.object({
   maxEstimatedDeliveryDate: z.string().optional(),
   freeShipping: z.boolean(),
 });
+
+const fulfillmentOptionSchema = z.object({
+  type: z
+    .enum(['SHIPPING', 'LOCAL_PICKUP'])
+    .describe('How the buyer receives the item. A listing may offer both.'),
+  available: z
+    .boolean()
+    .describe('False when eBay offers the method but not to the requested destination.'),
+  shippingCost: moneySchema
+    .optional()
+    .describe('Cost of this method. Zero for local pickup; absent when eBay quoted no price.'),
+  shippingCostKnown: z.boolean(),
+  shippingCostRequiresLocation: z
+    .boolean()
+    .describe('True when a buyer country/postal code would let eBay quote a calculated price.'),
+  serviceName: z.string().optional(),
+  serviceCode: z.string().optional(),
+  carrierCode: z.string().optional(),
+  costType: z.string().optional().describe('e.g. FIXED or CALCULATED.'),
+  fulfilledThrough: z.string().optional(),
+  importCharges: moneySchema.optional(),
+  additionalCostPerUnit: moneySchema.optional(),
+  minEstimatedDeliveryDate: z.string().optional(),
+  maxEstimatedDeliveryDate: z.string().optional(),
+  unavailableReason: z.enum(['DESTINATION_NOT_SERVED']).optional(),
+  source: z.string().optional().describe('The eBay payload field this option came from.'),
+});
+
+const fulfillmentDiagnosticsSchema = z
+  .object({
+    sourceFields: z.array(z.string()),
+    deliveryOptionEnums: z.array(z.string()),
+    pickupOptionsPresent: z.boolean(),
+    destinationCountrySupplied: z.boolean(),
+    destinationPostalCodeSupplied: z.boolean(),
+    shipToLocationsEvaluated: z.boolean(),
+    destinationExcludedByShipToLocations: z.boolean(),
+    shippingOptionCount: z.number(),
+    localPickupOptionCount: z.number(),
+    classification: z.enum([
+      'SHIPPING_COST_KNOWN',
+      'SHIPPING_COST_REQUIRES_LOCATION',
+      'SHIPPING_COST_UNKNOWN',
+      'LOCAL_PICKUP_ONLY',
+      'NO_FULFILLMENT_DATA',
+    ]),
+  })
+  .describe("Why the connector classified the listing's fulfillment the way it did.");
+
+/** The derived fulfillment fields shared by listings, search rows and variations. */
+const fulfillmentFieldsShape = {
+  fulfillmentOptions: z
+    .array(fulfillmentOptionSchema)
+    .describe(
+      'Every fulfillment method eBay exposes. Shipping and local pickup can both be present; ' +
+        'never treat them as mutually exclusive.',
+    ),
+  shippingAvailable: z.boolean(),
+  localPickupAvailable: z.boolean(),
+  localPickupOnly: z
+    .boolean()
+    .describe('True only when no shippable option exists for the requested destination.'),
+  shippingCost: moneySchema
+    .optional()
+    .describe("Cheapest known shipped-delivery cost; never local pickup's zero cost."),
+  shippingCostKnown: z.boolean(),
+  shippingCostRequiresLocation: z
+    .boolean()
+    .describe(
+      'True when shipping exists but eBay needs a buyer country/postal code to price it. ' +
+        'This is not the same as shipping being unavailable.',
+    ),
+};
 
 const returnTermsSchema = z.object({
   returnsAccepted: z.boolean().optional(),
@@ -221,15 +310,24 @@ const listingSchema = z
     seller: sellerSchema,
     itemLocation: locationSchema,
 
-    shippingOptions: z.array(shippingOptionSchema),
-    lowestShippingCost: moneySchema.optional(),
+    shippingOptions: z
+      .array(shippingOptionSchema)
+      .describe('Raw eBay shipping quotes, local-pickup rows included. Prefer fulfillmentOptions.'),
+    ...fulfillmentFieldsShape,
+    minEstimatedDeliveryDate: z.string().optional(),
+    maxEstimatedDeliveryDate: z.string().optional(),
+    lowestShippingCost: moneySchema
+      .optional()
+      .describe('Alias of shippingCost, kept for backwards compatibility.'),
     estimatedDeliveredTotal: moneySchema
       .optional()
       .describe(
-        'Current price (or current bid for auctions) plus the cheapest known shipping option. ' +
-          'Absent when eBay only quotes calculated shipping and no buyer location is configured.',
+        'Current price (or current bid for auctions) plus the cheapest known shipped-delivery ' +
+          'cost. Absent when the shipped cost is unknown, e.g. calculated shipping with no ' +
+          'buyer location; local pickup never contributes a zero cost here.',
       ),
     shipsToCountries: z.array(z.string()),
+    fulfillmentDiagnostics: fulfillmentDiagnosticsSchema,
 
     returnTerms: returnTermsSchema.optional(),
     availability: availabilitySchema.optional(),
@@ -290,6 +388,9 @@ const listingSummarySchema = z
     conditionId: z.string().optional(),
     seller: sellerSchema,
     itemLocation: locationSchema,
+    ...fulfillmentFieldsShape,
+    minEstimatedDeliveryDate: z.string().optional(),
+    maxEstimatedDeliveryDate: z.string().optional(),
     lowestShippingCost: moneySchema.optional(),
     estimatedDeliveredTotal: moneySchema.optional(),
     itemCreationDate: z.string().optional(),
@@ -332,6 +433,7 @@ const itemGroupVariationSchema = z.object({
   active: z.boolean(),
   seller: sellerSchema,
   shippingOptions: z.array(shippingOptionSchema),
+  ...fulfillmentFieldsShape,
   lowestShippingCost: moneySchema.optional(),
   estimatedDeliveredTotal: moneySchema.optional(),
   imageUrl: z.string().optional(),
@@ -382,6 +484,7 @@ export const getListingTool = defineTool({
   inputSchema: z.object({
     item: itemReference,
     marketplaceId: marketplaceId.optional(),
+    ...destinationInputShape,
   }),
   outputSchema: z.object({
     kind: z
@@ -398,6 +501,10 @@ export const getListingTool = defineTool({
     const resolved = await services.listings.resolveItem({
       item: input.item,
       ...(input.marketplaceId === undefined ? {} : { marketplaceId: input.marketplaceId }),
+      ...(input.deliveryCountry === undefined ? {} : { deliveryCountry: input.deliveryCountry }),
+      ...(input.deliveryPostalCode === undefined
+        ? {}
+        : { deliveryPostalCode: input.deliveryPostalCode }),
     });
     const { reference } = resolved;
     return {
@@ -445,6 +552,7 @@ export const getItemGroupTool = defineTool({
           '(v1|142373490668|623456789012), or an itemGroupHref containing item_group_id.',
       ),
     marketplaceId: marketplaceId.optional(),
+    ...destinationInputShape,
   }),
   outputSchema: z.object({
     itemGroup: itemGroupSchema,
@@ -454,6 +562,10 @@ export const getItemGroupTool = defineTool({
     const { itemGroup, reference } = await services.listings.getItemGroup({
       itemGroup: input.itemGroup,
       ...(input.marketplaceId === undefined ? {} : { marketplaceId: input.marketplaceId }),
+      ...(input.deliveryCountry === undefined ? {} : { deliveryCountry: input.deliveryCountry }),
+      ...(input.deliveryPostalCode === undefined
+        ? {}
+        : { deliveryPostalCode: input.deliveryPostalCode }),
     });
     return {
       itemGroup: writable(itemGroup),
@@ -511,12 +623,7 @@ export const searchListingsTool = defineTool({
       .optional()
       .describe('Return only listings that accept returns.'),
     itemLocationCountry: countryCode.optional().describe('Country the item is located in.'),
-    deliveryCountry: countryCode.optional().describe('Country the buyer wants delivery to.'),
-    deliveryPostalCode: z
-      .string()
-      .max(20)
-      .optional()
-      .describe('Buyer postal code; improves shipping-cost accuracy. Requires deliveryCountry.'),
+    ...destinationInputShape,
     sellers: z
       .array(z.string().max(64))
       .max(20)

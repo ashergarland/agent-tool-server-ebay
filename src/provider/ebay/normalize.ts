@@ -1,6 +1,7 @@
 import type {
   Availability,
   BuyingOption,
+  FulfillmentSummary,
   ItemAspect,
   ItemGroup,
   ItemGroupVariation,
@@ -14,6 +15,7 @@ import type {
   SellerInfo,
   ShippingOption,
 } from '../types.js';
+import { normaliseFulfillment, type FulfillmentResult } from './fulfillment.js';
 import { itemGroupIdFromHref, toBrowseItemId } from './urls.js';
 
 /**
@@ -28,6 +30,8 @@ const MAX_ADDITIONAL_IMAGES = 12;
 const MAX_ITEM_SPECIFICS = 60;
 const MAX_SHIPPING_OPTIONS = 10;
 const MAX_SHIP_TO_COUNTRIES = 40;
+
+const LOCAL_PICKUP_PATTERN = /pick\s*-?\s*up|pickup|collect(?:ion)?/i;
 
 type Json = Record<string, unknown>;
 
@@ -158,20 +162,21 @@ export const toShippingOption = (value: unknown): ShippingOption | undefined => 
   };
 };
 
-const toShippingOptions = (value: unknown): readonly ShippingOption[] =>
-  asArray(value)
-    .map(toShippingOption)
-    .filter((option): option is ShippingOption => option !== undefined)
-    .slice(0, MAX_SHIPPING_OPTIONS);
-
 /**
  * The cheapest *known* shipping cost. Options with an unknown cost (eBay's `CALCULATED` type
- * without a buyer location) are ignored rather than treated as free.
+ * without a buyer location) are ignored rather than treated as free, and local pickup rows are
+ * excluded so that collecting in person never masquerades as free delivery.
  */
+/** True when a normalised shipping option is really a local-pickup row. */
+export const isLocalPickupOption = (option: ShippingOption): boolean =>
+  [option.type, option.serviceCode, option.carrierCode, option.costType, option.fulfilledThrough]
+    .filter((value): value is string => value !== undefined)
+    .some((value) => LOCAL_PICKUP_PATTERN.test(value));
+
 export const lowestShippingCost = (options: readonly ShippingOption[]): Money | undefined => {
   let lowest: Money | undefined;
   for (const option of options) {
-    if (!option.cost) continue;
+    if (!option.cost || isLocalPickupOption(option)) continue;
     if (!lowest || option.cost.value < lowest.value) lowest = option.cost;
   }
   return lowest;
@@ -267,10 +272,66 @@ const isActive = (secondsRemaining: number | undefined, availabilityStatus: stri
   return { ended, active: !ended && !outOfStock };
 };
 
+/** Minimal logging port, so normalisation can explain itself without importing a logger. */
+export interface NormaliseLogger {
+  debug(payload: Record<string, unknown>, message: string): void;
+}
+
 export interface NormaliseOptions {
   readonly marketplaceId: MarketplaceId;
   readonly nowMs?: number;
+  /** Buyer destination that was sent to eBay, used to explain calculated-shipping outcomes. */
+  readonly deliveryCountry?: string | undefined;
+  readonly deliveryPostalCode?: string | undefined;
+  readonly logger?: NormaliseLogger | undefined;
 }
+
+/**
+ * Runs fulfillment normalisation and emits a debug record describing what was found and why the
+ * listing was classified the way it was. No credentials or tokens are ever part of this record.
+ */
+const fulfillmentFor = (
+  item: Json,
+  itemId: string,
+  currency: string | undefined,
+  options: NormaliseOptions,
+): FulfillmentResult => {
+  const result = normaliseFulfillment(item, {
+    deliveryCountry: options.deliveryCountry,
+    deliveryPostalCode: options.deliveryPostalCode,
+    currency,
+  });
+
+  options.logger?.debug(
+    {
+      event: 'ebay.fulfillment.normalised',
+      itemId,
+      marketplaceId: options.marketplaceId,
+      ...result.diagnostics,
+      shippingAvailable: result.shippingAvailable,
+      localPickupAvailable: result.localPickupAvailable,
+      localPickupOnly: result.localPickupOnly,
+      shippingCostKnown: result.shippingCostKnown,
+      shippingCostRequiresLocation: result.shippingCostRequiresLocation,
+    },
+    'normalised eBay fulfillment options',
+  );
+
+  return result;
+};
+
+/** The derived fulfillment fields shared by listings, summaries and variations. */
+const fulfillmentFields = (result: FulfillmentResult): FulfillmentSummary => ({
+  fulfillmentOptions: result.fulfillmentOptions,
+  shippingAvailable: result.shippingAvailable,
+  localPickupAvailable: result.localPickupAvailable,
+  localPickupOnly: result.localPickupOnly,
+  shippingCost: result.shippingCost,
+  shippingCostKnown: result.shippingCostKnown,
+  shippingCostRequiresLocation: result.shippingCostRequiresLocation,
+  minEstimatedDeliveryDate: result.minEstimatedDeliveryDate,
+  maxEstimatedDeliveryDate: result.maxEstimatedDeliveryDate,
+});
 
 /**
  * eBay describes an item's parent variation group in `primaryItemGroup` on an `Item`, and with a
@@ -299,10 +360,12 @@ export const normaliseListing = (payload: unknown, options: NormaliseOptions): L
   const itemId = str(item['itemId']) ?? (legacyItemId ? toBrowseItemId(legacyItemId) : '');
 
   const buyingOptions = toBuyingOptions(item['buyingOptions']);
-  const shippingOptions = toShippingOptions(item['shippingOptions']);
-  const cheapestShipping = lowestShippingCost(shippingOptions);
   const price = toMoney(item['price']);
   const currentBidPrice = toMoney(item['currentBidPrice']);
+  const fulfillment = fulfillmentFor(item, itemId, (currentBidPrice ?? price)?.currency, options);
+  const shippingOptions = fulfillment.shippingOptions.slice(0, MAX_SHIPPING_OPTIONS);
+  // Local pickup's zero cost must never stand in for a shipped price.
+  const cheapestShipping = fulfillment.shippingCost;
 
   const itemEndDate = str(item['itemEndDate']);
   const secondsRemaining = secondsUntil(itemEndDate, nowMs);
@@ -356,10 +419,12 @@ export const normaliseListing = (payload: unknown, options: NormaliseOptions): L
     itemLocation: toLocation(item['itemLocation']),
 
     shippingOptions,
+    ...fulfillmentFields(fulfillment),
     lowestShippingCost: cheapestShipping,
     // For an auction in progress the meaningful figure is the current bid, not the start price.
     estimatedDeliveredTotal: deliveredTotal(currentBidPrice ?? price, cheapestShipping),
     shipsToCountries: toShipToCountries(item['shipToLocations']),
+    fulfillmentDiagnostics: fulfillment.diagnostics,
 
     returnTerms: toReturnTerms(item['returnTerms']),
     availability,
@@ -398,10 +463,10 @@ export const normaliseListingSummary = (
   const legacyItemId = str(item['legacyItemId']);
   const itemId = str(item['itemId']) ?? (legacyItemId ? toBrowseItemId(legacyItemId) : '');
   const buyingOptions = toBuyingOptions(item['buyingOptions']);
-  const shippingOptions = toShippingOptions(item['shippingOptions']);
-  const cheapestShipping = lowestShippingCost(shippingOptions);
   const price = toMoney(item['price']);
   const currentBidPrice = toMoney(item['currentBidPrice']);
+  const fulfillment = fulfillmentFor(item, itemId, (currentBidPrice ?? price)?.currency, options);
+  const cheapestShipping = fulfillment.shippingCost;
 
   const itemEndDate = str(item['itemEndDate']);
   const secondsRemaining = secondsUntil(itemEndDate, nowMs);
@@ -433,6 +498,7 @@ export const normaliseListingSummary = (
     conditionId: str(item['conditionId']),
     seller: toSeller(item['seller']),
     itemLocation: toLocation(item['itemLocation']),
+    ...fulfillmentFields(fulfillment),
     lowestShippingCost: cheapestShipping,
     estimatedDeliveredTotal: deliveredTotal(currentBidPrice ?? price, cheapestShipping),
     itemCreationDate: str(item['itemCreationDate']),
@@ -478,6 +544,13 @@ const toVariation = (listing: Listing): ItemGroupVariation => ({
   active: listing.active,
   seller: listing.seller,
   shippingOptions: listing.shippingOptions,
+  fulfillmentOptions: listing.fulfillmentOptions,
+  shippingAvailable: listing.shippingAvailable,
+  localPickupAvailable: listing.localPickupAvailable,
+  localPickupOnly: listing.localPickupOnly,
+  shippingCost: listing.shippingCost,
+  shippingCostKnown: listing.shippingCostKnown,
+  shippingCostRequiresLocation: listing.shippingCostRequiresLocation,
   lowestShippingCost: listing.lowestShippingCost,
   estimatedDeliveredTotal: listing.estimatedDeliveredTotal,
   imageUrl: listing.imageUrl,
@@ -524,6 +597,7 @@ export const normaliseItemGroup = (
   const items = rawItems.map((item) =>
     toVariation(
       normaliseListing(item, {
+        ...options,
         marketplaceId: options.marketplaceId,
         ...(options.nowMs === undefined ? {} : { nowMs: options.nowMs }),
       }),
