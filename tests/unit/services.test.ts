@@ -54,6 +54,31 @@ describe('ListingsService.getListing', () => {
     expect(input.legacyVariationId).toBeUndefined();
   });
 
+  it('applies the configured default buyer destination', async () => {
+    const { provider, services } = build(
+      {},
+      { EBAY_DELIVERY_COUNTRY: 'US', EBAY_DELIVERY_POSTAL_CODE: '19406' },
+    );
+    await services.listings.getListing({ item: 'v1|407111131587|0' });
+
+    expect(lastCall(provider, 'getListing')?.args[0]).toMatchObject({
+      deliveryCountry: 'US',
+      deliveryPostalCode: '19406',
+    });
+  });
+
+  it('passes a caller-supplied destination and drops the unrelated default postal code', async () => {
+    const { provider, services } = build(
+      {},
+      { EBAY_DELIVERY_COUNTRY: 'US', EBAY_DELIVERY_POSTAL_CODE: '19406' },
+    );
+    await services.listings.getListing({ item: 'v1|407111131587|0', deliveryCountry: 'GB' });
+
+    const input = lastCall(provider, 'getListing')?.args[0] as GetListingInput;
+    expect(input.deliveryCountry).toBe('GB');
+    expect(input.deliveryPostalCode).toBeUndefined();
+  });
+
   it('keeps the variation segment of a supplied Browse item id', async () => {
     const { provider, services } = build();
     await services.listings.getListing({ item: 'v1|142373490668|623456789012' });

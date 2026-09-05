@@ -55,6 +55,35 @@ calculation.
 Search and comparison prices are active asking prices or current auction bids. The server does not
 turn them into a valuation or buying recommendation.
 
+### Fulfillment: shipping and local pickup
+
+A listing can offer shipped delivery and local pickup at the same time, so fulfillment is never
+reported as a single either/or choice. Every listing, search row, and variation carries:
+
+- `fulfillmentOptions[]`, one entry per method eBay exposes, each typed `SHIPPING` or
+  `LOCAL_PICKUP` with its own cost, cost-known flag, and estimated delivery dates.
+- `shippingAvailable`, `localPickupAvailable`, and `localPickupOnly`. `localPickupOnly` is true
+  only when no shippable option exists for the requested destination.
+- `shippingCost` (the cheapest known _shipped_ cost — a $0 local pickup is never used here),
+  `shippingCostKnown`, and `shippingCostRequiresLocation`.
+- `estimatedDeliveredTotal` = item price (or current bid) + shipped delivery cost. It stays absent
+  when the shipped cost is unknown rather than falling back to the bare item price.
+- `minEstimatedDeliveryDate` / `maxEstimatedDeliveryDate` when eBay quotes a delivery window.
+
+Three outcomes are kept distinct instead of collapsing into "shipping unavailable":
+`shippingAvailable: false` (genuinely not shippable to the destination, with per-option
+`unavailableReason`), `shippingCostRequiresLocation: true` (shippable, but eBay needs a buyer
+country/postal code to price it), and `localPickupOnly: true`. `fulfillmentDiagnostics` on a
+listing records which payload fields were read and why the classification was chosen; the same
+record is logged at debug level and contains no credentials.
+
+`ebay_get_listing`, `ebay_get_item_group`, and `ebay_search_listings` all accept `deliveryCountry`
+and `deliveryPostalCode`, fall back to `EBAY_DELIVERY_COUNTRY` / `EBAY_DELIVERY_POSTAL_CODE`, and
+send the destination to eBay as buyer context, so search rows and item detail are normalized from
+the same destination and do not contradict each other. Search rows are still thinner than item
+detail: when a row reports `shippingCostKnown: false`, fetch the listing with `ebay_get_listing`
+for the authoritative shipping data.
+
 ### Provider limitations and approval
 
 - Browse search covers active inventory, not sold or completed inventory.
@@ -63,7 +92,13 @@ turn them into a valuation or buying recommendation.
 - Production Buy API access may require eBay approval. Sandbox behavior is available with a sandbox
   keyset and `EBAY_ENVIRONMENT=sandbox`.
 - Calculated shipping is often absent unless `EBAY_DELIVERY_COUNTRY` and
-  `EBAY_DELIVERY_POSTAL_CODE` supply buyer context.
+  `EBAY_DELIVERY_POSTAL_CODE` (or the per-call `deliveryCountry` / `deliveryPostalCode` inputs)
+  supply buyer context. When eBay still returns no price, the connector reports
+  `shippingCostRequiresLocation` rather than claiming the item cannot be shipped.
+- The eBay website can show shipping prices and delivery estimates that the public Browse API does
+  not return for the same item — item_summary/search in particular omits or thins shipping data,
+  and some marketplaces omit calculated quotes entirely. The connector normalizes every fulfillment
+  field the API does return, but it cannot invent data eBay withholds and does not scrape the site.
 - The server uses documented eBay APIs only and does not scrape eBay pages.
 
 ## Architecture
@@ -429,20 +464,20 @@ CI does not deploy.
 
 ## Troubleshooting
 
-| Symptom                                | Likely cause and response                                                                                                                                    |
-| -------------------------------------- | ------------------------------------------------------------------------------------------------------------------------------------------------------------ |
-| Startup `ConfigurationError`           | Correct the named variable; common causes are short keys, partial eBay credentials, or disabled production auth.                                             |
-| `/tools` or `/mcp` returns 401         | Supply the configured `x-api-key` or bearer token.                                                                                                           |
-| eBay returns 401/403                   | Match the keyset to `EBAY_ENVIRONMENT`; production Browse access may require approval.                                                                       |
-| Listing is 404 but exists in a browser | Pass its marketplace or use the full eBay country-site URL.                                                                                                  |
-| Delivered total is missing             | eBay omitted shipping; configure buyer country and postal code.                                                                                              |
-| Search has no sold results             | Expected: Browse search contains active listings only.                                                                                                       |
-| First Azure deployment cannot read KV  | Use `provision.sh`; do not skip its foundation, role propagation, and secret-write pass.                                                                     |
-| OpenAPI advertises localhost           | Run `deploy.sh` so it discovers the existing FQDN and sets `PUBLIC_BASE_URL`.                                                                                |
-| First request is slow                  | A scale-to-zero cold start is expected; raise `minReplicas` only after accepting the cost.                                                                   |
-| eBay rejects the callback registration | The hashed endpoint must equal the portal entry exactly; compare `EBAY_ACCOUNT_DELETION_ENDPOINT_URL` character for character, including any trailing slash. |
-| Callback returns 404                   | Both `EBAY_ACCOUNT_DELETION_ENDPOINT_URL` and `EBAY_ACCOUNT_DELETION_VERIFICATION_TOKEN` must be set; the route is unmounted otherwise.                      |
-| Test notification returns 412          | The signature did not verify. Confirm the deployment can reach `api.ebay.com` and that the eBay credentials in Key Vault are real.                           |
+| Symptom                                | Likely cause and response                                                                                                                                                                          |
+| -------------------------------------- | -------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| Startup `ConfigurationError`           | Correct the named variable; common causes are short keys, partial eBay credentials, or disabled production auth.                                                                                   |
+| `/tools` or `/mcp` returns 401         | Supply the configured `x-api-key` or bearer token.                                                                                                                                                 |
+| eBay returns 401/403                   | Match the keyset to `EBAY_ENVIRONMENT`; production Browse access may require approval.                                                                                                             |
+| Listing is 404 but exists in a browser | Pass its marketplace or use the full eBay country-site URL.                                                                                                                                        |
+| Delivered total is missing             | The shipped cost is unknown (usually calculated shipping); pass `deliveryCountry`/`deliveryPostalCode` or configure the defaults. A $0 local pickup is deliberately not used as the shipping cost. |
+| Search has no sold results             | Expected: Browse search contains active listings only.                                                                                                                                             |
+| First Azure deployment cannot read KV  | Use `provision.sh`; do not skip its foundation, role propagation, and secret-write pass.                                                                                                           |
+| OpenAPI advertises localhost           | Run `deploy.sh` so it discovers the existing FQDN and sets `PUBLIC_BASE_URL`.                                                                                                                      |
+| First request is slow                  | A scale-to-zero cold start is expected; raise `minReplicas` only after accepting the cost.                                                                                                         |
+| eBay rejects the callback registration | The hashed endpoint must equal the portal entry exactly; compare `EBAY_ACCOUNT_DELETION_ENDPOINT_URL` character for character, including any trailing slash.                                       |
+| Callback returns 404                   | Both `EBAY_ACCOUNT_DELETION_ENDPOINT_URL` and `EBAY_ACCOUNT_DELETION_VERIFICATION_TOKEN` must be set; the route is unmounted otherwise.                                                            |
+| Test notification returns 412          | The signature did not verify. Confirm the deployment can reach `api.ebay.com` and that the eBay credentials in Key Vault are real.                                                                 |
 
 ## Contributing and security
 
