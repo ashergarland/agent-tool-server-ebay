@@ -47,6 +47,76 @@ export interface ShippingOption {
   readonly freeShipping: boolean;
 }
 
+export type FulfillmentType = 'SHIPPING' | 'LOCAL_PICKUP';
+
+/**
+ * One way a buyer can receive the item. A listing may expose several at once — shipped delivery
+ * *and* free local pickup is common — so these are never mutually exclusive.
+ */
+export interface FulfillmentOption {
+  readonly type: FulfillmentType;
+  /** False when eBay offers the method but not to the requested destination. */
+  readonly available: boolean;
+  /** The cost of this method. Zero for local pickup; absent when eBay quoted no price. */
+  readonly shippingCost?: Money | undefined;
+  /** False when eBay exposes the method without a price (typically calculated shipping). */
+  readonly shippingCostKnown: boolean;
+  /** True when supplying a buyer country/postal code would let eBay quote the price. */
+  readonly shippingCostRequiresLocation: boolean;
+  readonly serviceName?: string | undefined;
+  readonly serviceCode?: string | undefined;
+  readonly carrierCode?: string | undefined;
+  readonly costType?: string | undefined;
+  readonly fulfilledThrough?: string | undefined;
+  readonly importCharges?: Money | undefined;
+  readonly additionalCostPerUnit?: Money | undefined;
+  readonly minEstimatedDeliveryDate?: string | undefined;
+  readonly maxEstimatedDeliveryDate?: string | undefined;
+  readonly unavailableReason?: 'DESTINATION_NOT_SERVED' | undefined;
+  /** The payload field this option was recovered from, for diagnostics. */
+  readonly source?: string | undefined;
+}
+
+/** Why the connector classified a listing's shipping the way it did. */
+export type FulfillmentClassification =
+  | 'SHIPPING_COST_KNOWN'
+  /** Shippable, but eBay needs more of the buyer's location before it will quote a price. */
+  | 'SHIPPING_COST_REQUIRES_LOCATION'
+  /** Shippable, the destination was fully supplied, and eBay still withheld the price. */
+  | 'SHIPPING_COST_UNKNOWN'
+  /** eBay offers shipping, but not to the requested destination. */
+  | 'SHIPPING_UNAVAILABLE_TO_DESTINATION'
+  | 'LOCAL_PICKUP_ONLY'
+  | 'NO_FULFILLMENT_DATA';
+
+export interface FulfillmentDiagnostics {
+  readonly sourceFields: readonly string[];
+  readonly deliveryOptionEnums: readonly string[];
+  readonly pickupOptionsPresent: boolean;
+  readonly destinationCountrySupplied: boolean;
+  readonly destinationPostalCodeSupplied: boolean;
+  readonly shipToLocationsEvaluated: boolean;
+  readonly destinationExcludedByShipToLocations: boolean;
+  readonly shippingOptionCount: number;
+  readonly localPickupOptionCount: number;
+  readonly classification: FulfillmentClassification;
+}
+
+/** The derived, caller-facing view of a listing's fulfillment methods. */
+export interface FulfillmentSummary {
+  readonly fulfillmentOptions: readonly FulfillmentOption[];
+  readonly shippingAvailable: boolean;
+  readonly localPickupAvailable: boolean;
+  /** True only when there is no shippable option for the requested destination. */
+  readonly localPickupOnly: boolean;
+  /** Cheapest known *shipped* cost; never the zero cost of a local pickup. */
+  readonly shippingCost: Money | undefined;
+  readonly shippingCostKnown: boolean;
+  readonly shippingCostRequiresLocation: boolean;
+  readonly minEstimatedDeliveryDate: string | undefined;
+  readonly maxEstimatedDeliveryDate: string | undefined;
+}
+
 export interface ReturnTerms {
   readonly returnsAccepted: boolean | undefined;
   readonly returnPeriodDays: number | undefined;
@@ -127,10 +197,26 @@ export interface Listing {
   readonly itemLocation: LocationInfo;
 
   readonly shippingOptions: readonly ShippingOption[];
+  /**
+   * Every fulfillment method eBay exposes for the listing. Shipping and local pickup coexist here;
+   * `localPickupOnly` is true only when no shippable option exists for the requested destination.
+   */
+  readonly fulfillmentOptions: readonly FulfillmentOption[];
+  readonly shippingAvailable: boolean;
+  readonly localPickupAvailable: boolean;
+  readonly localPickupOnly: boolean;
+  /** Cheapest known shipped-delivery cost; local pickup's zero cost is never used here. */
+  readonly shippingCost: Money | undefined;
+  readonly shippingCostKnown: boolean;
+  readonly shippingCostRequiresLocation: boolean;
+  readonly minEstimatedDeliveryDate: string | undefined;
+  readonly maxEstimatedDeliveryDate: string | undefined;
+  /** Alias of {@link shippingCost}, kept for backwards compatibility. */
   readonly lowestShippingCost: Money | undefined;
-  /** Item price plus the cheapest shipping option, when both are known and share a currency. */
+  /** Item price plus the cheapest shipped-delivery cost, when both are known and share a currency. */
   readonly estimatedDeliveredTotal: Money | undefined;
   readonly shipsToCountries: readonly string[];
+  readonly fulfillmentDiagnostics: FulfillmentDiagnostics;
 
   readonly returnTerms: ReturnTerms | undefined;
   readonly availability: Availability | undefined;
@@ -179,6 +265,15 @@ export interface ListingSummary {
   readonly conditionId: string | undefined;
   readonly seller: SellerInfo;
   readonly itemLocation: LocationInfo;
+  readonly fulfillmentOptions: readonly FulfillmentOption[];
+  readonly shippingAvailable: boolean;
+  readonly localPickupAvailable: boolean;
+  readonly localPickupOnly: boolean;
+  readonly shippingCost: Money | undefined;
+  readonly shippingCostKnown: boolean;
+  readonly shippingCostRequiresLocation: boolean;
+  readonly minEstimatedDeliveryDate: string | undefined;
+  readonly maxEstimatedDeliveryDate: string | undefined;
   readonly lowestShippingCost: Money | undefined;
   readonly estimatedDeliveredTotal: Money | undefined;
   readonly itemCreationDate: string | undefined;
@@ -237,6 +332,9 @@ export interface SearchResult {
 
 export interface GetListingInput {
   readonly marketplaceId: MarketplaceId;
+  /** Buyer destination, so eBay quotes shipping for the right place. */
+  readonly deliveryCountry?: string | undefined;
+  readonly deliveryPostalCode?: string | undefined;
   /** Browse item id (`v1|...|...`); preferred when the caller supplied one. */
   readonly itemId?: string | undefined;
   /** Numeric legacy item id; used when no Browse item id is available. */
@@ -267,6 +365,15 @@ export interface ItemGroupVariation {
   readonly active: boolean;
   readonly seller: SellerInfo;
   readonly shippingOptions: readonly ShippingOption[];
+  readonly fulfillmentOptions: readonly FulfillmentOption[];
+  readonly shippingAvailable: boolean;
+  readonly localPickupAvailable: boolean;
+  readonly localPickupOnly: boolean;
+  readonly shippingCost: Money | undefined;
+  readonly shippingCostKnown: boolean;
+  readonly shippingCostRequiresLocation: boolean;
+  readonly minEstimatedDeliveryDate: string | undefined;
+  readonly maxEstimatedDeliveryDate: string | undefined;
   readonly lowestShippingCost: Money | undefined;
   readonly estimatedDeliveredTotal: Money | undefined;
   readonly imageUrl: string | undefined;
@@ -289,6 +396,8 @@ export interface ItemGroup {
 export interface GetItemGroupInput {
   readonly marketplaceId: MarketplaceId;
   readonly itemGroupId: string;
+  readonly deliveryCountry?: string | undefined;
+  readonly deliveryPostalCode?: string | undefined;
 }
 
 /**

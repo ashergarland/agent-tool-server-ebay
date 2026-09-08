@@ -42,9 +42,12 @@ export interface CreateApplicationOptions {
  * the provider eagerly would turn that into a startup crash, so construction — and the loud error
  * when credentials are missing — happens on first use instead.
  */
-const lazyProvider = (config: AppConfig): EbayProvider => {
+const lazyProvider = (config: AppConfig, logger: Logger): EbayProvider => {
   let instance: EbayProvider | undefined;
-  const resolve = (): EbayProvider => (instance ??= createEbayProvider(config));
+  const resolve = (): EbayProvider =>
+    (instance ??= createEbayProvider(config, {
+      logger: { debug: (payload, message) => logger.debug(payload, message) },
+    }));
 
   return {
     getListing: (input) => resolve().getListing(input),
@@ -60,7 +63,7 @@ const lazyProvider = (config: AppConfig): EbayProvider => {
 export const createApplication = (options: CreateApplicationOptions = {}): Application => {
   const config = options.config ?? loadConfig();
   const logger = options.logger ?? createLogger(config);
-  const provider = options.provider ?? lazyProvider(config);
+  const provider = options.provider ?? lazyProvider(config, logger);
   const services = createServices(config, provider, logger, options.itemReferenceResolver);
   const registry = createToolRegistry();
   const accountDeletion = options.accountDeletion ?? createAccountDeletionService(config);

@@ -27,6 +27,13 @@ export interface EbayGetOptions {
   readonly query?: Readonly<Record<string, string | number | undefined>>;
   /** Context used in error messages, e.g. `getListing`. */
   readonly context: string;
+  /**
+   * Per-request buyer destination. eBay only returns calculated shipping costs and delivery
+   * estimates for a contextual location, so a caller-supplied destination overrides the
+   * deployment-wide default for this request.
+   */
+  readonly deliveryCountry?: string | undefined;
+  readonly deliveryPostalCode?: string | undefined;
 }
 
 const defaultSleep = (ms: number): Promise<void> =>
@@ -79,14 +86,27 @@ export class EbayRestClient {
     return url.toString();
   }
 
-  private async headers(marketplaceId: MarketplaceId): Promise<Record<string, string>> {
+  /** The end-user context for a request: the caller's destination when given, else the default. */
+  private contextFor(options: EbayGetOptions): string | undefined {
+    if (!options.deliveryCountry) return this.endUserContext;
+    return buildEndUserContext({
+      deliveryCountry: options.deliveryCountry,
+      deliveryPostalCode: options.deliveryPostalCode,
+      affiliateCampaignId: this.options.affiliateCampaignId,
+    });
+  }
+
+  private async headers(
+    marketplaceId: MarketplaceId,
+    endUserContext: string | undefined,
+  ): Promise<Record<string, string>> {
     const token = await this.options.tokens.getToken();
     return {
       authorization: `Bearer ${token}`,
       accept: 'application/json',
       'content-type': 'application/json',
       'X-EBAY-C-MARKETPLACE-ID': marketplaceId,
-      ...(this.endUserContext === undefined ? {} : { 'X-EBAY-C-ENDUSERCTX': this.endUserContext }),
+      ...(endUserContext === undefined ? {} : { 'X-EBAY-C-ENDUSERCTX': endUserContext }),
     };
   }
 
@@ -96,6 +116,7 @@ export class EbayRestClient {
    */
   public async get<T>(path: string, options: EbayGetOptions): Promise<T> {
     const url = this.buildUrl(path, options.query);
+    const endUserContext = this.contextFor(options);
     let lastError: AppError | undefined;
     let retriedAfterUnauthorized = false;
 
@@ -107,7 +128,7 @@ export class EbayRestClient {
       try {
         response = await this.fetchImpl(url, {
           method: 'GET',
-          headers: await this.headers(options.marketplaceId),
+          headers: await this.headers(options.marketplaceId, endUserContext),
           signal: controller.signal,
         });
       } catch (error) {

@@ -89,6 +89,86 @@ describe('EbayRestClient — request construction', () => {
       'contextualLocation=country%3DUS%2Czip%3D19406',
     );
   });
+
+  it('prefers a per-request buyer destination over the configured default', async () => {
+    const { client, fetch } = buildClient([{ status: 200, body: {} }], {
+      deliveryCountry: 'US',
+      deliveryPostalCode: '19406',
+      affiliateCampaignId: '1234567890',
+    });
+
+    await client.get('/buy/browse/v1/item/x', {
+      marketplaceId: 'EBAY_GB',
+      context: 'getListing',
+      deliveryCountry: 'GB',
+      deliveryPostalCode: 'SW1A1AA',
+    });
+
+    expect(browseRequests(fetch)[0]?.headers['x-ebay-c-enduserctx']).toBe(
+      'affiliateCampaignId=1234567890,contextualLocation=country%3DGB%2Czip%3DSW1A1AA',
+    );
+  });
+});
+
+describe('BrowseApiProvider — buyer destination', () => {
+  it('passes the destination to getItem and reports the shipped cost, not pickup', async () => {
+    const { client, fetch } = buildClient([
+      {
+        status: 200,
+        body: {
+          itemId: 'v1|1|0',
+          price: { value: '2.22', currency: 'USD' },
+          shippingOptions: [
+            {
+              type: 'USPS Ground Advantage',
+              shippingCostType: 'FIXED',
+              shippingCost: { value: '5.48', currency: 'USD' },
+            },
+            {
+              type: 'Local Pickup',
+              shippingCostType: 'FIXED',
+              shippingCost: { value: '0.00', currency: 'USD' },
+            },
+          ],
+        },
+      },
+    ]);
+
+    const listing = await new BrowseApiProvider(client).getListing({
+      marketplaceId: 'EBAY_US',
+      itemId: 'v1|1|0',
+      deliveryCountry: 'US',
+      deliveryPostalCode: '19406',
+    });
+
+    expect(browseRequests(fetch)[0]?.headers['x-ebay-c-enduserctx']).toBe(
+      'contextualLocation=country%3DUS%2Czip%3D19406',
+    );
+    expect(listing.shippingAvailable).toBe(true);
+    expect(listing.localPickupAvailable).toBe(true);
+    expect(listing.localPickupOnly).toBe(false);
+    expect(listing.shippingCost).toEqual({ value: 5.48, currency: 'USD' });
+    expect(listing.estimatedDeliveredTotal).toEqual({ value: 7.7, currency: 'USD' });
+  });
+
+  it('logs fulfillment diagnostics without any credential material', async () => {
+    const { client } = buildClient([{ status: 200, body: { itemId: 'v1|1|0' } }]);
+    const debug = vi.fn();
+
+    await new BrowseApiProvider(client, { debug }).getListing({
+      marketplaceId: 'EBAY_US',
+      itemId: 'v1|1|0',
+    });
+
+    expect(debug).toHaveBeenCalledWith(
+      expect.objectContaining({
+        event: 'ebay.fulfillment.normalised',
+        classification: 'NO_FULFILLMENT_DATA',
+      }),
+      expect.any(String),
+    );
+    expect(JSON.stringify(debug.mock.calls)).not.toMatch(/authorization|bearer|secret/i);
+  });
 });
 
 describe('buildEndUserContext', () => {
