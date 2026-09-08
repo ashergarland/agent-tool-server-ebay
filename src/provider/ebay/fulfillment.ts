@@ -124,6 +124,17 @@ interface RawQuote {
   readonly source: string;
 }
 
+/** A quote is pickup when any of the fields eBay uses to name the service says so. */
+const isPickupQuote = (raw: Json): boolean =>
+  [
+    str(raw['type']),
+    str(raw['shippingServiceCode']),
+    str(raw['shippingCarrierCode']),
+    str(raw['shippingCostType']),
+    str(raw['fulfilledThrough']),
+    str(raw['shippingServiceName']),
+  ].some(isPickupText);
+
 /** Collects every shipping-quote-shaped object found anywhere in the known containers. */
 const collectQuotes = (item: Json): readonly RawQuote[] => {
   const quotes: RawQuote[] = [];
@@ -143,10 +154,14 @@ const collectQuotes = (item: Json): readonly RawQuote[] => {
   }
 
   // Some marketplaces flatten a single quote onto the item itself (`shippingCost` +
-  // `shippingCostType` without any container). That is still a usable shipping price.
+  // `shippingCostType` without any container). That is still a usable shipping price, and it must
+  // survive a container that lists nothing but pickup rows — otherwise a listing offering paid
+  // shipping alongside free local pickup would collapse into pickup-only.
+  const hasShippedQuote = quotes.some((quote) => !isPickupQuote(quote.raw));
   if (
-    quotes.length === 0 &&
-    (isMoneyLike(item['shippingCost']) || str(item['shippingCostType']) !== undefined)
+    !hasShippedQuote &&
+    (isMoneyLike(item['shippingCost']) || str(item['shippingCostType']) !== undefined) &&
+    !isPickupQuote(item)
   ) {
     quotes.push({ raw: item, source: 'item.shippingCost' });
   }
@@ -170,19 +185,6 @@ const toShippingOptionShape = (raw: Json): ShippingOption => {
     freeShipping: cost !== undefined && cost.value === 0,
   };
 };
-
-/** A quote is pickup when any of the fields eBay uses to name the service says so. */
-const isPickupQuote = (raw: Json): boolean =>
-  [
-    str(raw['type']),
-    str(raw['shippingServiceCode']),
-    str(raw['shippingCarrierCode']),
-    str(raw['shippingCostType']),
-    str(raw['fulfilledThrough']),
-    str(raw['shippingServiceName']),
-  ].some(isPickupText);
-
-const CALCULATED = 'CALCULATED';
 
 /** eBay's `estimatedAvailabilities[].deliveryOptions` enum values, e.g. SHIP_TO_HOME. */
 const deliveryOptionEnums = (item: Json): readonly string[] => {
@@ -307,7 +309,14 @@ export const normaliseFulfillment = (
   const quotes = collectQuotes(item);
   const enums = deliveryOptionEnums(item);
   const pickupOptionsPresent = hasPickupOptions(item);
-  const destinationSupplied = input.deliveryCountry !== undefined;
+  const destinationCountrySupplied = input.deliveryCountry !== undefined;
+  const destinationPostalCodeSupplied = input.deliveryPostalCode !== undefined;
+  /**
+   * Supplying more of the buyer's address can only help while some of it is still missing. Once
+   * eBay has both the country and the postal code and still returns no price, the cost is withheld
+   * by the API, not waiting on the caller.
+   */
+  const moreLocationCouldHelp = !(destinationCountrySupplied && destinationPostalCodeSupplied);
   const currency = input.currency;
   const freeCost = (): Money | undefined =>
     currency === undefined ? undefined : { value: 0, currency };
@@ -321,7 +330,6 @@ export const normaliseFulfillment = (
     shippingOptions.push(shape);
     const isPickup = isPickupQuote(quote.raw);
     const costKnown = shape.cost !== undefined;
-    const calculated = shape.costType?.toUpperCase() === CALCULATED;
 
     const option: FulfillmentOption = {
       type: isPickup ? 'LOCAL_PICKUP' : 'SHIPPING',
@@ -336,7 +344,7 @@ export const normaliseFulfillment = (
             })()
           : {}),
       shippingCostKnown: isPickup ? true : costKnown,
-      shippingCostRequiresLocation: !isPickup && !costKnown && (calculated || !destinationSupplied),
+      shippingCostRequiresLocation: !isPickup && !costKnown && moreLocationCouldHelp,
       serviceName: shape.type,
       serviceCode: shape.serviceCode,
       carrierCode: shape.carrierCode,
@@ -376,7 +384,7 @@ export const normaliseFulfillment = (
       type: 'SHIPPING',
       available: true,
       shippingCostKnown: false,
-      shippingCostRequiresLocation: true,
+      shippingCostRequiresLocation: moreLocationCouldHelp,
       source: 'estimatedAvailabilities.deliveryOptions',
     });
   }
@@ -405,16 +413,18 @@ export const normaliseFulfillment = (
     sourceFields: [...new Set(quotes.map((quote) => quote.source))],
     deliveryOptionEnums: enums,
     pickupOptionsPresent,
-    destinationCountrySupplied: destinationSupplied,
-    destinationPostalCodeSupplied: input.deliveryPostalCode !== undefined,
+    destinationCountrySupplied,
+    destinationPostalCodeSupplied,
     shipToLocationsEvaluated: shipTo.evaluated,
     destinationExcludedByShipToLocations: shipTo.excluded,
     shippingOptionCount: shipping.length,
     localPickupOptionCount: pickup.length,
     classification: !shippingAvailable
-      ? localPickupAvailable
-        ? 'LOCAL_PICKUP_ONLY'
-        : 'NO_FULFILLMENT_DATA'
+      ? shipTo.excluded && shipping.length > 0
+        ? 'SHIPPING_UNAVAILABLE_TO_DESTINATION'
+        : localPickupAvailable
+          ? 'LOCAL_PICKUP_ONLY'
+          : 'NO_FULFILLMENT_DATA'
       : shippingCost !== undefined
         ? 'SHIPPING_COST_KNOWN'
         : shippingCostRequiresLocation

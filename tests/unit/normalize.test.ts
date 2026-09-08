@@ -440,6 +440,35 @@ describe('item group normalisation', () => {
     expect(group.varyingAspects).toEqual(['Colour', 'Capacity']);
   });
 
+  it('carries the shipped delivery window onto each variation', () => {
+    const group = normaliseItemGroup(
+      {
+        items: [
+          {
+            itemId: 'v1|1|1',
+            price: { value: '10.00', currency: 'USD' },
+            shippingOptions: [
+              {
+                type: 'Standard Shipping',
+                shippingCost: { value: '4.00', currency: 'USD' },
+                minEstimatedDeliveryDate: '2026-09-08T07:00:00.000Z',
+                maxEstimatedDeliveryDate: '2026-09-11T07:00:00.000Z',
+              },
+              { type: 'Local Pickup', shippingCost: { value: '0.00', currency: 'USD' } },
+            ],
+          },
+        ],
+      },
+      { ...options, itemGroupId: '1' },
+    );
+
+    const variation = group.items[0];
+    expect(variation?.minEstimatedDeliveryDate).toBe('2026-09-08T07:00:00.000Z');
+    expect(variation?.maxEstimatedDeliveryDate).toBe('2026-09-11T07:00:00.000Z');
+    expect(variation?.shippingCost).toEqual({ value: 4, currency: 'USD' });
+    expect(variation?.localPickupOnly).toBe(false);
+  });
+
   it('reports no varying aspects for a single-item group', () => {
     const group = normaliseItemGroup(
       { items: [{ itemId: 'v1|1|1', localizedAspects: [{ name: 'Colour', value: 'Blue' }] }] },

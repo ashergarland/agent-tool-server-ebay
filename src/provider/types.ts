@@ -80,8 +80,12 @@ export interface FulfillmentOption {
 /** Why the connector classified a listing's shipping the way it did. */
 export type FulfillmentClassification =
   | 'SHIPPING_COST_KNOWN'
+  /** Shippable, but eBay needs more of the buyer's location before it will quote a price. */
   | 'SHIPPING_COST_REQUIRES_LOCATION'
+  /** Shippable, the destination was fully supplied, and eBay still withheld the price. */
   | 'SHIPPING_COST_UNKNOWN'
+  /** eBay offers shipping, but not to the requested destination. */
+  | 'SHIPPING_UNAVAILABLE_TO_DESTINATION'
   | 'LOCAL_PICKUP_ONLY'
   | 'NO_FULFILLMENT_DATA';
 
@@ -368,6 +372,8 @@ export interface ItemGroupVariation {
   readonly shippingCost: Money | undefined;
   readonly shippingCostKnown: boolean;
   readonly shippingCostRequiresLocation: boolean;
+  readonly minEstimatedDeliveryDate: string | undefined;
+  readonly maxEstimatedDeliveryDate: string | undefined;
   readonly lowestShippingCost: Money | undefined;
   readonly estimatedDeliveredTotal: Money | undefined;
   readonly imageUrl: string | undefined;

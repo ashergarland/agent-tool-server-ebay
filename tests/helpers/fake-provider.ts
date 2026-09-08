@@ -276,6 +276,8 @@ export const makeVariation = (overrides: Partial<ItemGroupVariation> = {}): Item
   shippingCost: { value: 9.99, currency: 'USD' },
   shippingCostKnown: true,
   shippingCostRequiresLocation: false,
+  minEstimatedDeliveryDate: '2024-01-08T00:00:00.000Z',
+  maxEstimatedDeliveryDate: '2024-01-12T00:00:00.000Z',
   lowestShippingCost: { value: 9.99, currency: 'USD' },
   estimatedDeliveredTotal: { value: 139.98, currency: 'USD' },
   imageUrl: 'https://i.ebayimg.com/images/g/n64/s-l1600.jpg',

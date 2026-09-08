@@ -115,6 +115,8 @@ describe('fulfillment normalisation', () => {
     expect(listing.fulfillmentDiagnostics.sourceFields).toEqual(['fulfillment.shippingOptions']);
   });
 
+  // Search never enriches its rows from item detail on its own; a caller that wants the priced
+  // quote makes an explicit ebay_get_listing follow-up. This asserts the two views agree.
   it('I: search rows and item detail agree, and detail carries the better data', () => {
     const summary = normaliseListingSummary(fixture('i-search-summary-incomplete'), options);
     const detail = normaliseListing(fixture('i-item-detail-complete'), options);
@@ -127,7 +129,7 @@ describe('fulfillment normalisation', () => {
     expect(summary.shippingCostRequiresLocation).toBe(true);
     expect(summary.estimatedDeliveredTotal).toBeUndefined();
 
-    // The detail call adds the price without contradicting the search row.
+    // An explicit detail follow-up adds the price without contradicting the search row.
     expect(detail.shippingAvailable).toBe(true);
     expect(detail.localPickupAvailable).toBe(true);
     expect(detail.shippingCost).toEqual(usd(14.2));
@@ -146,7 +148,10 @@ describe('fulfillment normalisation', () => {
     expect(listing.shippingCost).toBeUndefined();
     expect(listing.shippingCostRequiresLocation).toBe(false);
     expect(listing.fulfillmentOptions[0]?.unavailableReason).toBe('DESTINATION_NOT_SERVED');
-    expect(listing.fulfillmentDiagnostics.classification).toBe('NO_FULFILLMENT_DATA');
+    // Destination exclusion is its own classification: eBay does ship this item, just not here.
+    expect(listing.fulfillmentDiagnostics.classification).toBe(
+      'SHIPPING_UNAVAILABLE_TO_DESTINATION',
+    );
   });
 
   it('J: still ships to a country the listing does serve', () => {
@@ -249,5 +254,45 @@ describe('fulfillment source discovery', () => {
       classification: 'SHIPPING_COST_KNOWN',
     });
     expect(JSON.stringify(result.diagnostics)).not.toMatch(/token|authorization/i);
+  });
+});
+
+describe('fulfillment review corrections', () => {
+  it('keeps a paid top-level shippingCost when shippingOptions holds only pickup', () => {
+    const result = normaliseFulfillment(
+      {
+        shippingOptions: [
+          { type: 'Local Pickup', shippingCost: { value: '0.00', currency: 'USD' } },
+        ],
+        shippingCost: { value: '5.48', currency: 'USD' },
+        shippingCostType: 'FIXED',
+      },
+      { currency: 'USD' },
+    );
+
+    expect(result.shippingAvailable).toBe(true);
+    expect(result.localPickupAvailable).toBe(true);
+    expect(result.localPickupOnly).toBe(false);
+    expect(result.shippingCost).toEqual(usd(5.48));
+    expect(result.diagnostics.sourceFields).toContain('item.shippingCost');
+  });
+
+  it('does not blame the buyer location when the full destination was already supplied', () => {
+    const payload = { estimatedAvailabilities: [{ deliveryOptions: ['SHIP_TO_HOME'] }] };
+
+    const complete = normaliseFulfillment(payload, {
+      deliveryCountry: 'US',
+      deliveryPostalCode: '19406',
+    });
+
+    expect(complete.shippingAvailable).toBe(true);
+    expect(complete.shippingCostKnown).toBe(false);
+    expect(complete.shippingCostRequiresLocation).toBe(false);
+    expect(complete.diagnostics.classification).toBe('SHIPPING_COST_UNKNOWN');
+
+    const countryOnly = normaliseFulfillment(payload, { deliveryCountry: 'US' });
+
+    expect(countryOnly.shippingCostRequiresLocation).toBe(true);
+    expect(countryOnly.diagnostics.classification).toBe('SHIPPING_COST_REQUIRES_LOCATION');
   });
 });

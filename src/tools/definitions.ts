@@ -111,6 +111,29 @@ const destinationInputShape = {
   deliveryPostalCode: postalCodeInput.optional(),
 };
 
+/**
+ * eBay cannot resolve a postal code without the country it belongs to, so the pair is rejected at
+ * the tool boundary rather than being sent as a destination that silently means nothing.
+ */
+const withDestinationRule = <
+  T extends z.ZodType<{
+    deliveryCountry?: string | undefined;
+    deliveryPostalCode?: string | undefined;
+  }>,
+>(
+  schema: T,
+) =>
+  schema.check((ctx) => {
+    if (ctx.value.deliveryPostalCode !== undefined && ctx.value.deliveryCountry === undefined) {
+      ctx.issues.push({
+        code: 'custom',
+        input: ctx.value,
+        path: ['deliveryPostalCode'],
+        message: 'deliveryPostalCode requires deliveryCountry to be supplied as well.',
+      });
+    }
+  });
+
 /* ----------------------------------------------------------- output schemas */
 
 const moneySchema = z
@@ -190,6 +213,7 @@ const fulfillmentDiagnosticsSchema = z
       'SHIPPING_COST_KNOWN',
       'SHIPPING_COST_REQUIRES_LOCATION',
       'SHIPPING_COST_UNKNOWN',
+      'SHIPPING_UNAVAILABLE_TO_DESTINATION',
       'LOCAL_PICKUP_ONLY',
       'NO_FULFILLMENT_DATA',
     ]),
@@ -434,6 +458,8 @@ const itemGroupVariationSchema = z.object({
   seller: sellerSchema,
   shippingOptions: z.array(shippingOptionSchema),
   ...fulfillmentFieldsShape,
+  minEstimatedDeliveryDate: z.string().optional(),
+  maxEstimatedDeliveryDate: z.string().optional(),
   lowestShippingCost: moneySchema.optional(),
   estimatedDeliveredTotal: moneySchema.optional(),
   imageUrl: z.string().optional(),
@@ -481,11 +507,13 @@ export const getListingTool = defineTool({
     'carries the group with every purchasable variation instead of a single listing. Only ' +
     'active-listing data is available; the connector cannot retrieve sold or completed prices.',
   kind: 'read',
-  inputSchema: z.object({
-    item: itemReference,
-    marketplaceId: marketplaceId.optional(),
-    ...destinationInputShape,
-  }),
+  inputSchema: withDestinationRule(
+    z.object({
+      item: itemReference,
+      marketplaceId: marketplaceId.optional(),
+      ...destinationInputShape,
+    }),
+  ),
   outputSchema: z.object({
     kind: z
       .enum(['listing', 'itemGroup'])
@@ -540,20 +568,22 @@ export const getItemGroupTool = defineTool({
     'itemGroupType set, or when ebay_get_listing reported kind="itemGroup". Take a variation ' +
     "itemId from the result to fetch that single variation's full detail with ebay_get_listing.",
   kind: 'read',
-  inputSchema: z.object({
-    itemGroup: z
-      .string()
-      .min(1)
-      .max(2048)
-      .describe(
-        'An eBay item group id (142373490668), the parent listing URL ' +
-          '(https://www.ebay.com/itm/142373490668), an eBay app mobile share link ' +
-          '(https://ebay.io/m/...), a Browse item id of one of the variations ' +
-          '(v1|142373490668|623456789012), or an itemGroupHref containing item_group_id.',
-      ),
-    marketplaceId: marketplaceId.optional(),
-    ...destinationInputShape,
-  }),
+  inputSchema: withDestinationRule(
+    z.object({
+      itemGroup: z
+        .string()
+        .min(1)
+        .max(2048)
+        .describe(
+          'An eBay item group id (142373490668), the parent listing URL ' +
+            '(https://www.ebay.com/itm/142373490668), an eBay app mobile share link ' +
+            '(https://ebay.io/m/...), a Browse item id of one of the variations ' +
+            '(v1|142373490668|623456789012), or an itemGroupHref containing item_group_id.',
+        ),
+      marketplaceId: marketplaceId.optional(),
+      ...destinationInputShape,
+    }),
+  ),
   outputSchema: z.object({
     itemGroup: itemGroupSchema,
     reference: itemGroupReferenceSchema,
@@ -591,58 +621,63 @@ export const searchListingsTool = defineTool({
     'listings, so treat them as asking prices rather than realised prices. Every row reports ' +
     'whether it is still active.',
   kind: 'read',
-  inputSchema: z.object({
-    query: z
-      .string()
-      .min(1)
-      .max(350)
-      .optional()
-      .describe(
-        'Keywords, e.g. "sega saturn console japanese". Required unless categoryIds is set.',
-      ),
-    categoryIds: z
-      .array(z.string().regex(/^\d{1,15}$/))
-      .max(10)
-      .optional()
-      .describe('eBay category ids to restrict the search to.'),
-    minPrice: z.number().min(0).max(1_000_000).optional().describe('Minimum item price.'),
-    maxPrice: z.number().min(0).max(1_000_000).optional().describe('Maximum item price.'),
-    currency: z
-      .string()
-      .regex(/^[A-Za-z]{3}$/)
-      .optional()
-      .describe('ISO 4217 currency for the price filter. Defaults to USD.'),
-    conditions: conditionsFilter,
-    conditionIds: conditionIdsFilter,
-    auctionOnly: z.boolean().optional().describe('Return only auction listings.'),
-    buyItNowOnly: z.boolean().optional().describe('Return only fixed-price listings.'),
-    acceptsBestOfferOnly: z.boolean().optional().describe('Return only listings accepting offers.'),
-    freeShippingOnly: z.boolean().optional().describe('Return only listings with free delivery.'),
-    returnsAcceptedOnly: z
-      .boolean()
-      .optional()
-      .describe('Return only listings that accept returns.'),
-    itemLocationCountry: countryCode.optional().describe('Country the item is located in.'),
-    ...destinationInputShape,
-    sellers: z
-      .array(z.string().max(64))
-      .max(20)
-      .optional()
-      .describe('Restrict to these eBay seller usernames.'),
-    excludeSellers: z.array(z.string().max(64)).max(20).optional(),
-    excludeCategoryIds: z
-      .array(z.string().regex(/^\d{1,15}$/))
-      .max(10)
-      .optional(),
-    searchInDescription: z
-      .boolean()
-      .optional()
-      .describe('Also match the listing description, not just the title. Requires query.'),
-    marketplaceId: marketplaceId.optional(),
-    sort,
-    limit: searchLimit,
-    offset: z.number().int().min(0).max(1000).default(0).describe('Pagination offset.'),
-  }),
+  inputSchema: withDestinationRule(
+    z.object({
+      query: z
+        .string()
+        .min(1)
+        .max(350)
+        .optional()
+        .describe(
+          'Keywords, e.g. "sega saturn console japanese". Required unless categoryIds is set.',
+        ),
+      categoryIds: z
+        .array(z.string().regex(/^\d{1,15}$/))
+        .max(10)
+        .optional()
+        .describe('eBay category ids to restrict the search to.'),
+      minPrice: z.number().min(0).max(1_000_000).optional().describe('Minimum item price.'),
+      maxPrice: z.number().min(0).max(1_000_000).optional().describe('Maximum item price.'),
+      currency: z
+        .string()
+        .regex(/^[A-Za-z]{3}$/)
+        .optional()
+        .describe('ISO 4217 currency for the price filter. Defaults to USD.'),
+      conditions: conditionsFilter,
+      conditionIds: conditionIdsFilter,
+      auctionOnly: z.boolean().optional().describe('Return only auction listings.'),
+      buyItNowOnly: z.boolean().optional().describe('Return only fixed-price listings.'),
+      acceptsBestOfferOnly: z
+        .boolean()
+        .optional()
+        .describe('Return only listings accepting offers.'),
+      freeShippingOnly: z.boolean().optional().describe('Return only listings with free delivery.'),
+      returnsAcceptedOnly: z
+        .boolean()
+        .optional()
+        .describe('Return only listings that accept returns.'),
+      itemLocationCountry: countryCode.optional().describe('Country the item is located in.'),
+      ...destinationInputShape,
+      sellers: z
+        .array(z.string().max(64))
+        .max(20)
+        .optional()
+        .describe('Restrict to these eBay seller usernames.'),
+      excludeSellers: z.array(z.string().max(64)).max(20).optional(),
+      excludeCategoryIds: z
+        .array(z.string().regex(/^\d{1,15}$/))
+        .max(10)
+        .optional(),
+      searchInDescription: z
+        .boolean()
+        .optional()
+        .describe('Also match the listing description, not just the title. Requires query.'),
+      marketplaceId: marketplaceId.optional(),
+      sort,
+      limit: searchLimit,
+      offset: z.number().int().min(0).max(1000).default(0).describe('Pagination offset.'),
+    }),
+  ),
   outputSchema: z.object({
     listings: z.array(listingSummarySchema),
     total: z.number().optional().describe('Total matches eBay reports, which may exceed limit.'),

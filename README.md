@@ -68,21 +68,36 @@ reported as a single either/or choice. Every listing, search row, and variation 
   `shippingCostKnown`, and `shippingCostRequiresLocation`.
 - `estimatedDeliveredTotal` = item price (or current bid) + shipped delivery cost. It stays absent
   when the shipped cost is unknown rather than falling back to the bare item price.
-- `minEstimatedDeliveryDate` / `maxEstimatedDeliveryDate` when eBay quotes a delivery window.
+- `minEstimatedDeliveryDate` / `maxEstimatedDeliveryDate` when eBay quotes a delivery window,
+  spanning the shipped options; the same pair is also on each `fulfillmentOptions[]` entry, so a
+  per-service window is available as well.
 
-Three outcomes are kept distinct instead of collapsing into "shipping unavailable":
-`shippingAvailable: false` (genuinely not shippable to the destination, with per-option
-`unavailableReason`), `shippingCostRequiresLocation: true` (shippable, but eBay needs a buyer
-country/postal code to price it), and `localPickupOnly: true`. `fulfillmentDiagnostics` on a
-listing records which payload fields were read and why the classification was chosen; the same
-record is logged at debug level and contains no credentials.
+Several outcomes are kept distinct instead of collapsing into "shipping unavailable". The
+`fulfillmentDiagnostics.classification` on a listing names the one that applies:
+
+| Classification                        | Meaning                                                           |
+| ------------------------------------- | ----------------------------------------------------------------- |
+| `SHIPPING_COST_KNOWN`                 | A shipped price was quoted.                                       |
+| `SHIPPING_COST_REQUIRES_LOCATION`     | Shippable, and supplying more buyer location could yield a quote. |
+| `SHIPPING_COST_UNKNOWN`               | Destination fully supplied, and eBay still withheld the price.    |
+| `SHIPPING_UNAVAILABLE_TO_DESTINATION` | eBay ships the item, but not to the requested destination.        |
+| `LOCAL_PICKUP_ONLY`                   | No shippable option exists for the requested destination.         |
+| `NO_FULFILLMENT_DATA`                 | The payload carried no fulfillment information at all.            |
+
+`shippingCostRequiresLocation` is therefore true only while missing destination information could
+plausibly produce a quote: once both `deliveryCountry` and `deliveryPostalCode` were supplied and
+eBay still returned no price, the cost is reported as unknown (API-withheld) instead. The
+diagnostics also record which payload fields were read; the same record is logged at debug level
+and contains no credentials.
 
 `ebay_get_listing`, `ebay_get_item_group`, and `ebay_search_listings` all accept `deliveryCountry`
 and `deliveryPostalCode`, fall back to `EBAY_DELIVERY_COUNTRY` / `EBAY_DELIVERY_POSTAL_CODE`, and
 send the destination to eBay as buyer context, so search rows and item detail are normalized from
-the same destination and do not contradict each other. Search rows are still thinner than item
-detail: when a row reports `shippingCostKnown: false`, fetch the listing with `ebay_get_listing`
-for the authoritative shipping data.
+the same destination and do not contradict each other. A postal code without a country is rejected
+at the tool-schema boundary, because eBay cannot resolve one without the other. Search rows are
+still thinner than item detail and search never enriches its own rows from item detail: when a row
+reports `shippingCostKnown: false`, make an explicit `ebay_get_listing` follow-up for the
+authoritative shipping data.
 
 ### Provider limitations and approval
 
@@ -94,7 +109,8 @@ for the authoritative shipping data.
 - Calculated shipping is often absent unless `EBAY_DELIVERY_COUNTRY` and
   `EBAY_DELIVERY_POSTAL_CODE` (or the per-call `deliveryCountry` / `deliveryPostalCode` inputs)
   supply buyer context. When eBay still returns no price, the connector reports
-  `shippingCostRequiresLocation` rather than claiming the item cannot be shipped.
+  `shippingCostRequiresLocation` (destination incomplete) or `SHIPPING_COST_UNKNOWN` (destination
+  complete, price withheld) rather than claiming the item cannot be shipped.
 - The eBay website can show shipping prices and delivery estimates that the public Browse API does
   not return for the same item — item_summary/search in particular omits or thins shipping data,
   and some marketplaces omit calculated quotes entirely. The connector normalizes every fulfillment

@@ -551,6 +551,8 @@ const toVariation = (listing: Listing): ItemGroupVariation => ({
   shippingCost: listing.shippingCost,
   shippingCostKnown: listing.shippingCostKnown,
   shippingCostRequiresLocation: listing.shippingCostRequiresLocation,
+  minEstimatedDeliveryDate: listing.minEstimatedDeliveryDate,
+  maxEstimatedDeliveryDate: listing.maxEstimatedDeliveryDate,
   lowestShippingCost: listing.lowestShippingCost,
   estimatedDeliveredTotal: listing.estimatedDeliveredTotal,
   imageUrl: listing.imageUrl,
