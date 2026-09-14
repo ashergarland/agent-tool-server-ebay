@@ -1,0 +1,114 @@
+{
+  "contractVersion": 1,
+  "kind": "capability-profile-declaration",
+  "capability": {
+    "id": "io.github.ashergarland/agent-tool-server-ebay",
+    "displayName": "eBay Marketplace",
+    "repository": "https://github.com/ashergarland/agent-tool-server-ebay"
+  },
+  "profiles": [
+    {
+      "id": "hosted-container-provider",
+      "description": "Authenticated hosted container deployment exposing read-only eBay listing tools against the external eBay provider.",
+      "dimensions": {
+        "execution": "hosted",
+        "delivery": "container",
+        "access": "authenticated-service",
+        "workload": "provider",
+        "provider": "external",
+        "mutation": "read-only"
+      },
+      "delivery": {
+        "supportedForms": ["container"],
+        "publication": {
+          "kind": "container",
+          "identifier": "chatgpt-ebay"
+        },
+        "entrypoint": {
+          "reference": "dist/index.js",
+          "interface": "http"
+        },
+        "mechanics": [
+          {
+            "id": "container-build",
+            "reference": "Dockerfile"
+          },
+          {
+            "id": "azure-infrastructure",
+            "reference": "infra/main.bicep"
+          },
+          {
+            "id": "hosted-provisioning",
+            "reference": "scripts/bootstrap/provision.sh"
+          },
+          {
+            "id": "hosted-deployment",
+            "reference": "scripts/bootstrap/deploy.sh"
+          }
+        ],
+        "provenance": {
+          "method": "build-recipe",
+          "reference": "Dockerfile"
+        }
+      },
+      "configuration": {
+        "schema": {
+          "id": "urn:io.github.ashergarland:agent-tool-server-ebay:deployment-parameters:v1",
+          "capabilityId": "io.github.ashergarland/agent-tool-server-ebay",
+          "path": "infra/main.bicep"
+        },
+        "bounded": true
+      },
+      "requiredSecrets": [
+        "connector-api-key",
+        "ebay-client-id",
+        "ebay-client-secret",
+        "ebay-account-deletion-token"
+      ],
+      "providerPrerequisites": [
+        {
+          "id": "ebay-developer-keyset",
+          "description": "An eBay developer application and keyset for the selected eBay environment are configured for OAuth client-credentials authentication."
+        },
+        {
+          "id": "ebay-buy-api-access",
+          "description": "The selected eBay application has Browse API access and any provider approval required for its target eBay environment."
+        },
+        {
+          "id": "marketplace-account-deletion-compliance",
+          "description": "A production eBay keyset has Marketplace Account Deletion/Closure compliance completed through the hosted callback or an eBay-granted exemption."
+        }
+      ],
+      "identity": {
+        "trustBoundary": "Authenticated callers cross the public HTTPS boundary; the hosted workload identity is limited to its deployment image and secret references, while eBay access uses separate application credentials.",
+        "rbac": [
+          "Pull the selected container image from the deployment registry.",
+          "Read the declared secret references from the deployment secret store.",
+          "Use the selected eBay application credentials only for documented read-only Browse API and Notification public-key operations."
+        ]
+      },
+      "workload": {
+        "interface": {
+          "kind": "provider",
+          "reference": "src/provider/types.ts#EbayProvider"
+        },
+        "authorization": {
+          "scope": "Read-only eBay Browse API access plus Notification public-key retrieval needed to authenticate Marketplace Account Deletion callbacks."
+        },
+        "lifecycle": {
+          "mode": "request",
+          "freshness": "Read provider listing data on each tool invocation; only OAuth tokens and notification public keys use bounded in-memory caches.",
+          "cleanup": "Persist no eBay listing, account, or notification payload data after request handling."
+        },
+        "notReady": {
+          "whenAbsent": "not-ready",
+          "reason": "Treat provider-backed behavior as unavailable when credentials, OAuth, or required eBay APIs cannot be used; process health alone does not establish provider readiness."
+        }
+      },
+      "extensionSchemas": [],
+      "verification": {
+        "surfaces": ["identity", "readiness", "version", "behavior", "provider", "provenance"]
+      }
+    }
+  ]
+}

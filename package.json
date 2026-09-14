@@ -23,6 +23,7 @@
     "test": "vitest run",
     "test:watch": "vitest",
     "test:coverage": "vitest run --coverage",
+    "deployment:validate": "tsx scripts/validate-deployment-contract.ts",
     "metadata:validate": "tsx scripts/validate-metadata.ts",
     "openapi:validate": "vitest run tests/unit/openapi.test.ts"
   },

@@ -232,6 +232,21 @@ The full activation runbook — provisioning, registration, the endpoint challen
 notification, keyset activation and ChatGPT connection — is in
 [docs/deployment.md](docs/deployment.md#post-merge-production-activation-runbook).
 
+## Deployment contract
+
+[`capability-profiles.json`](capability-profiles.json) is the canonical account-neutral version-1
+deployment declaration. Its `hosted-container-provider` profile is explicitly hosted, container
+delivered, authenticated, provider-backed, externally provided, and **read-only**. It describes the
+reusable deployment mechanics, configuration interface, secret names, provider prerequisites,
+identity expectations, and verification surfaces without storing an operator's desired state or
+secret values.
+
+Public declaration and deployed-source revisions are pinned independently. Updating the declaration
+does not change production source, and the private deployment-instance migration remains separate
+Phase B work after this declaration is reviewed and merged. See
+[the deployment-contract guide](docs/deployment-contract.md) for the ownership boundary and exact
+Platform source-checkout validation procedure.
+
 ## Local development
 
 Requirements: Node.js 22+, npm, and an eBay developer keyset for real provider calls.
