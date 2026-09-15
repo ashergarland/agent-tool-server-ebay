@@ -1,0 +1,200 @@
+{
+  "contractVersion": 1,
+  "kind": "deployment-instance",
+  "capability": {
+    "id": "io.github.ashergarland/agent-tool-server-ebay"
+  },
+  "environment": {
+    "name": "synthetic-review",
+    "classification": "test"
+  },
+  "profile": {
+    "id": "hosted-container-provider",
+    "dimensions": {
+      "execution": "hosted",
+      "delivery": "container",
+      "access": "authenticated-service",
+      "workload": "provider",
+      "provider": "external",
+      "mutation": "read-only"
+    }
+  },
+  "declaration": {
+    "repository": "https://github.com/ashergarland/agent-tool-server-ebay",
+    "revision": "1111111111111111111111111111111111111111",
+    "path": "capability-profiles.json"
+  },
+  "source": {
+    "repository": "https://github.com/ashergarland/agent-tool-server-ebay",
+    "revision": "2222222222222222222222222222222222222222",
+    "path": "."
+  },
+  "artifact": {
+    "kind": "build-from-source",
+    "expectedArtifactKind": "container",
+    "buildEntrypoint": "Dockerfile",
+    "provenance": {
+      "method": "build-record",
+      "reference": "evidence-store:synthetic.invalid/ebay-review/container-build"
+    },
+    "requiredEvidence": {
+      "producedDigest": true,
+      "sourceBinding": true
+    }
+  },
+  "deployment": {
+    "entrypoint": {
+      "reference": "dist/index.js",
+      "arguments": []
+    },
+    "parameters": {
+      "reference": "operator-git:synthetic.invalid/ebay-review/parameters.json",
+      "schemaId": "urn:io.github.ashergarland:agent-tool-server-ebay:deployment-parameters:v1"
+    },
+    "hosted": {
+      "authenticatedAccess": {
+        "mechanism": "API key authentication on protected HTTP and MCP routes.",
+        "authorityReference": "operator-git:synthetic.invalid/ebay-review/authentication.json"
+      },
+      "readiness": {
+        "reference": "route:/health",
+        "timeoutSeconds": 120
+      },
+      "versionIdentity": {
+        "reference": "route:/version",
+        "expectedSourceRevision": "2222222222222222222222222222222222222222"
+      },
+      "configurationBoundsReference": "repository:infra/main.bicep",
+      "rollout": {
+        "strategy": "Replace the synthetic hosted revision only after immutable container build evidence is available.",
+        "maximumUnavailable": 1,
+        "requireArtifactEvidence": true
+      }
+    }
+  },
+  "secrets": {
+    "provider": {
+      "kind": "external",
+      "reference": "secret-store:synthetic.invalid/ebay-review"
+    },
+    "references": [
+      {
+        "name": "connector-api-key",
+        "reference": "secret-store:synthetic.invalid/ebay-review/connector-api-key"
+      },
+      {
+        "name": "ebay-client-id",
+        "reference": "secret-store:synthetic.invalid/ebay-review/ebay-client-id"
+      },
+      {
+        "name": "ebay-client-secret",
+        "reference": "secret-store:synthetic.invalid/ebay-review/ebay-client-secret"
+      },
+      {
+        "name": "ebay-account-deletion-token",
+        "reference": "secret-store:synthetic.invalid/ebay-review/ebay-account-deletion-token"
+      }
+    ]
+  },
+  "workload": {
+    "kind": "provider",
+    "source": {
+      "reference": "provider:synthetic.invalid/ebay-sandbox"
+    },
+    "interface": {
+      "reference": "repository:src/provider/types.ts#EbayProvider"
+    },
+    "authorization": {
+      "scope": "Read-only eBay Browse API and Notification public-key access for the synthetic keyset.",
+      "reference": "operator-git:synthetic.invalid/ebay-review/provider-authorization.json"
+    },
+    "lifecycle": {
+      "mode": "request",
+      "freshness": "Read provider state on each synthetic verification invocation.",
+      "cleanup": "Retain no provider response after the invocation finishes."
+    },
+    "notReady": {
+      "whenAbsent": "not-ready",
+      "reasonCode": "provider-unavailable"
+    }
+  },
+  "prerequisites": {
+    "provider": [
+      {
+        "id": "ebay-developer-keyset",
+        "reference": "provider-prerequisite:synthetic.invalid/ebay-developer-keyset"
+      },
+      {
+        "id": "ebay-buy-api-access",
+        "reference": "provider-prerequisite:synthetic.invalid/ebay-buy-api-access"
+      },
+      {
+        "id": "marketplace-account-deletion-compliance",
+        "reference": "provider-prerequisite:synthetic.invalid/account-deletion-compliance"
+      }
+    ],
+    "identity": {
+      "reference": "identity:synthetic.invalid/ebay-review-service",
+      "rbac": [
+        {
+          "scope": "Only the synthetic deployment registry, secret store, and eBay sandbox keyset.",
+          "permissions": [
+            "Pull the selected container image from the deployment registry.",
+            "Read the declared secret references from the deployment secret store.",
+            "Use the selected eBay application credentials only for documented read-only Browse API and Notification public-key operations."
+          ]
+        }
+      ]
+    },
+    "registrations": [
+      {
+        "id": "marketplace-account-deletion-callback",
+        "reference": "provider-registration:synthetic.invalid/account-deletion-callback"
+      }
+    ]
+  },
+  "verification": {
+    "identity": [
+      {
+        "id": "authenticated-service",
+        "expectation": "Protected routes reject unauthenticated requests and accept the selected synthetic caller credential."
+      }
+    ],
+    "readiness": [
+      {
+        "id": "process-readiness",
+        "expectation": "The public health route reports process readiness independently of provider access."
+      }
+    ],
+    "version": [
+      {
+        "id": "source-version",
+        "expectation": "The version route reports the pinned synthetic source revision."
+      }
+    ],
+    "behavior": [
+      {
+        "id": "read-only-tool-behavior",
+        "expectation": "An authenticated listing tool invocation returns schema-valid provider data without exposing a consequential operation."
+      }
+    ],
+    "provider": [
+      {
+        "id": "ebay-provider-readiness",
+        "expectation": "A separate authenticated eBay sandbox Browse API smoke check succeeds; process health alone is insufficient."
+      }
+    ],
+    "provenance": [
+      {
+        "id": "container-source-binding",
+        "expectation": "The produced container digest and build record bind to the pinned synthetic source revision before rollout."
+      }
+    ]
+  },
+  "rollback": {
+    "kind": "operator-strategy",
+    "reference": "operator-git:synthetic.invalid/ebay-review/rollback.json",
+    "description": "Select a previously reviewed immutable source and container digest for the synthetic environment."
+  },
+  "extensions": []
+}
