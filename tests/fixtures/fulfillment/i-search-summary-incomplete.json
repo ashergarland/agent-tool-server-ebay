@@ -1,0 +1,19 @@
+{
+  "itemId": "v1|100000000009|0",
+  "title": "Search row with incomplete shipping",
+  "price": {
+    "value": "75.00",
+    "currency": "USD"
+  },
+  "shippingOptions": [
+    {
+      "shippingCostType": "CALCULATED",
+      "type": "Calculated"
+    }
+  ],
+  "pickupOptions": [
+    {
+      "pickupLocationType": "STORE"
+    }
+  ]
+}

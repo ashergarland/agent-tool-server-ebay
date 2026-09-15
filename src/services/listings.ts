@@ -21,11 +21,16 @@ import type { Guardrails } from './guardrails.js';
 export interface GetListingRequest {
   readonly item: string;
   readonly marketplaceId?: string | undefined;
+  /** Buyer destination; eBay needs it to quote calculated shipping and delivery estimates. */
+  readonly deliveryCountry?: string | undefined;
+  readonly deliveryPostalCode?: string | undefined;
 }
 
 export interface GetItemGroupRequest {
   readonly itemGroup: string;
   readonly marketplaceId?: string | undefined;
+  readonly deliveryCountry?: string | undefined;
+  readonly deliveryPostalCode?: string | undefined;
 }
 
 export interface SearchListingsRequest {
@@ -112,7 +117,7 @@ export class ListingsService {
   public async getListing(request: GetListingRequest): Promise<ResolvedListing> {
     const { reference, marketplaceId } = await this.resolveReference(request);
     const listing = await this.provider.getListing(
-      this.toGetListingInput(reference, marketplaceId),
+      this.toGetListingInput(reference, marketplaceId, this.resolveDestination(request)),
     );
     return { listing, reference };
   }
@@ -125,10 +130,11 @@ export class ListingsService {
    */
   public async resolveItem(request: GetListingRequest): Promise<ResolvedItemReference> {
     const { reference, marketplaceId } = await this.resolveReference(request);
+    const destination = this.resolveDestination(request);
 
     try {
       const listing = await this.provider.getListing(
-        this.toGetListingInput(reference, marketplaceId),
+        this.toGetListingInput(reference, marketplaceId, destination),
       );
       return { kind: 'listing', listing, reference };
     } catch (error) {
@@ -138,6 +144,7 @@ export class ListingsService {
       const itemGroup = await this.provider.getItemGroup({
         marketplaceId,
         itemGroupId: error.itemGroupId,
+        ...destination,
       });
       return { kind: 'itemGroup', itemGroup, reference };
     }
@@ -164,12 +171,33 @@ export class ListingsService {
     };
   }
 
+  /**
+   * The destination to quote shipping for: whatever the caller asked for, else the deployment
+   * default. A caller-supplied country without a postal code intentionally drops the default
+   * postal code, which belongs to a different place.
+   */
+  private resolveDestination(request: {
+    readonly deliveryCountry?: string | undefined;
+    readonly deliveryPostalCode?: string | undefined;
+  }): { deliveryCountry: string | undefined; deliveryPostalCode: string | undefined } {
+    return {
+      deliveryCountry: request.deliveryCountry ?? this.guardrails.defaultDeliveryCountry,
+      deliveryPostalCode:
+        request.deliveryPostalCode ??
+        (request.deliveryCountry === undefined
+          ? this.guardrails.defaultDeliveryPostalCode
+          : undefined),
+    };
+  }
+
   private toGetListingInput(
     reference: ItemReference,
     marketplaceId: MarketplaceId,
+    destination: { deliveryCountry: string | undefined; deliveryPostalCode: string | undefined },
   ): GetListingInput {
     return {
       marketplaceId,
+      ...destination,
       ...(reference.browseItemIdSupplied || reference.legacyItemId === undefined
         ? { itemId: reference.itemId }
         : {
@@ -189,6 +217,7 @@ export class ListingsService {
     const itemGroup = await this.provider.getItemGroup({
       marketplaceId,
       itemGroupId: reference.itemGroupId,
+      ...this.resolveDestination(request),
     });
     return { itemGroup, reference };
   }
@@ -205,12 +234,7 @@ export class ListingsService {
     if (request.acceptsBestOfferOnly) buyingOptions.push('BEST_OFFER');
 
     const marketplaceId = this.resolveMarketplaceFor(request.marketplaceId);
-    const deliveryCountry = request.deliveryCountry ?? this.guardrails.defaultDeliveryCountry;
-    const deliveryPostalCode =
-      request.deliveryPostalCode ??
-      (request.deliveryCountry === undefined
-        ? this.guardrails.defaultDeliveryPostalCode
-        : undefined);
+    const { deliveryCountry, deliveryPostalCode } = this.resolveDestination(request);
 
     return this.provider.searchListings({
       marketplaceId,

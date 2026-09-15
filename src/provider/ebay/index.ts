@@ -16,6 +16,7 @@ import {
   normaliseListingSummary,
   normaliseTotal,
   normaliseWarnings,
+  type NormaliseLogger,
 } from './normalize.js';
 import { EbayTokenProvider, type FetchLike } from './oauth.js';
 import { EbayRestClient } from './rest.js';
@@ -27,9 +28,13 @@ export * from './short-links.js';
 export * from './urls.js';
 export { buildSearchFilter, toEbaySort } from './filters.js';
 export { buildEndUserContext } from './rest.js';
+export { normaliseFulfillment } from './fulfillment.js';
+export type { FulfillmentInput, FulfillmentResult } from './fulfillment.js';
+export type { NormaliseLogger } from './normalize.js';
 export {
   addMoney,
   deliveredTotal,
+  isLocalPickupOption,
   lowestShippingCost,
   normaliseItemGroup,
   normaliseListing,
@@ -59,7 +64,10 @@ interface SearchResponse {
  * the codebase that knows eBay's REST paths, query parameters and payload shapes.
  */
 export class BrowseApiProvider implements EbayProvider {
-  public constructor(private readonly client: EbayRestClient) {}
+  public constructor(
+    private readonly client: EbayRestClient,
+    private readonly logger?: NormaliseLogger | undefined,
+  ) {}
 
   public async getListing(input: GetListingInput): Promise<Listing> {
     try {
@@ -70,11 +78,18 @@ export class BrowseApiProvider implements EbayProvider {
               marketplaceId: input.marketplaceId,
               query: { fieldgroups: GET_ITEM_FIELDGROUPS },
               context: 'getListing',
+              deliveryCountry: input.deliveryCountry,
+              deliveryPostalCode: input.deliveryPostalCode,
             },
           )
         : await this.getByLegacyId(input);
 
-      return normaliseListing(payload, { marketplaceId: input.marketplaceId });
+      return normaliseListing(payload, {
+        marketplaceId: input.marketplaceId,
+        deliveryCountry: input.deliveryCountry,
+        deliveryPostalCode: input.deliveryPostalCode,
+        logger: this.logger,
+      });
     } catch (error) {
       // eBay names the group in its error, but not always; the id we asked with is the group id.
       if (isItemGroupError(error)) {
@@ -101,6 +116,8 @@ export class BrowseApiProvider implements EbayProvider {
         fieldgroups: GET_ITEM_FIELDGROUPS,
       },
       context: 'getListing',
+      deliveryCountry: input.deliveryCountry,
+      deliveryPostalCode: input.deliveryPostalCode,
     });
   }
 
@@ -114,11 +131,16 @@ export class BrowseApiProvider implements EbayProvider {
       marketplaceId: input.marketplaceId,
       query: { item_group_id: input.itemGroupId },
       context: 'getItemGroup',
+      deliveryCountry: input.deliveryCountry,
+      deliveryPostalCode: input.deliveryPostalCode,
     });
 
     return normaliseItemGroup(payload, {
       marketplaceId: input.marketplaceId,
       itemGroupId: input.itemGroupId,
+      deliveryCountry: input.deliveryCountry,
+      deliveryPostalCode: input.deliveryPostalCode,
+      logger: this.logger,
     });
   }
 
@@ -141,12 +163,19 @@ export class BrowseApiProvider implements EbayProvider {
         offset: input.offset,
       },
       context: 'searchListings',
+      deliveryCountry: input.deliveryCountry,
+      deliveryPostalCode: input.deliveryPostalCode,
     });
 
     const summaries = Array.isArray(payload.itemSummaries) ? payload.itemSummaries : [];
     return {
       listings: summaries.map((summary) =>
-        normaliseListingSummary(summary, { marketplaceId: input.marketplaceId }),
+        normaliseListingSummary(summary, {
+          marketplaceId: input.marketplaceId,
+          deliveryCountry: input.deliveryCountry,
+          deliveryPostalCode: input.deliveryPostalCode,
+          logger: this.logger,
+        }),
       ),
       total: normaliseTotal(payload),
       limit: input.limit,
@@ -162,6 +191,8 @@ export interface CreateEbayProviderOptions {
   readonly fetchImpl?: FetchLike;
   readonly sleep?: (ms: number) => Promise<void>;
   readonly now?: () => number;
+  /** Optional logger, used for fulfillment normalisation diagnostics. */
+  readonly logger?: NormaliseLogger | undefined;
 }
 
 /**
@@ -204,5 +235,5 @@ export const createEbayProvider = (
     ...(options.sleep ? { sleep: options.sleep } : {}),
   });
 
-  return new BrowseApiProvider(client);
+  return new BrowseApiProvider(client, options.logger);
 };

@@ -95,6 +95,45 @@ const countryCode = z
   .regex(/^[A-Za-z]{2}$/, 'must be a two letter ISO 3166 country code')
   .describe('Two letter ISO 3166 country code, e.g. US or GB.');
 
+const postalCodeInput = z
+  .string()
+  .max(20)
+  .describe('Buyer postal code; improves shipping-cost accuracy. Requires deliveryCountry.');
+
+/** Buyer destination inputs, shared by every tool that reads shipping data. */
+const destinationInputShape = {
+  deliveryCountry: countryCode
+    .optional()
+    .describe(
+      'Country the buyer wants delivery to. eBay quotes calculated shipping and delivery ' +
+        'estimates for this destination.',
+    ),
+  deliveryPostalCode: postalCodeInput.optional(),
+};
+
+/**
+ * eBay cannot resolve a postal code without the country it belongs to, so the pair is rejected at
+ * the tool boundary rather than being sent as a destination that silently means nothing.
+ */
+const withDestinationRule = <
+  T extends z.ZodType<{
+    deliveryCountry?: string | undefined;
+    deliveryPostalCode?: string | undefined;
+  }>,
+>(
+  schema: T,
+) =>
+  schema.check((ctx) => {
+    if (ctx.value.deliveryPostalCode !== undefined && ctx.value.deliveryCountry === undefined) {
+      ctx.issues.push({
+        code: 'custom',
+        input: ctx.value,
+        path: ['deliveryPostalCode'],
+        message: 'deliveryPostalCode requires deliveryCountry to be supplied as well.',
+      });
+    }
+  });
+
 /* ----------------------------------------------------------- output schemas */
 
 const moneySchema = z
@@ -131,6 +170,80 @@ const shippingOptionSchema = z.object({
   maxEstimatedDeliveryDate: z.string().optional(),
   freeShipping: z.boolean(),
 });
+
+const fulfillmentOptionSchema = z.object({
+  type: z
+    .enum(['SHIPPING', 'LOCAL_PICKUP'])
+    .describe('How the buyer receives the item. A listing may offer both.'),
+  available: z
+    .boolean()
+    .describe('False when eBay offers the method but not to the requested destination.'),
+  shippingCost: moneySchema
+    .optional()
+    .describe('Cost of this method. Zero for local pickup; absent when eBay quoted no price.'),
+  shippingCostKnown: z.boolean(),
+  shippingCostRequiresLocation: z
+    .boolean()
+    .describe('True when a buyer country/postal code would let eBay quote a calculated price.'),
+  serviceName: z.string().optional(),
+  serviceCode: z.string().optional(),
+  carrierCode: z.string().optional(),
+  costType: z.string().optional().describe('e.g. FIXED or CALCULATED.'),
+  fulfilledThrough: z.string().optional(),
+  importCharges: moneySchema.optional(),
+  additionalCostPerUnit: moneySchema.optional(),
+  minEstimatedDeliveryDate: z.string().optional(),
+  maxEstimatedDeliveryDate: z.string().optional(),
+  unavailableReason: z.enum(['DESTINATION_NOT_SERVED']).optional(),
+  source: z.string().optional().describe('The eBay payload field this option came from.'),
+});
+
+const fulfillmentDiagnosticsSchema = z
+  .object({
+    sourceFields: z.array(z.string()),
+    deliveryOptionEnums: z.array(z.string()),
+    pickupOptionsPresent: z.boolean(),
+    destinationCountrySupplied: z.boolean(),
+    destinationPostalCodeSupplied: z.boolean(),
+    shipToLocationsEvaluated: z.boolean(),
+    destinationExcludedByShipToLocations: z.boolean(),
+    shippingOptionCount: z.number(),
+    localPickupOptionCount: z.number(),
+    classification: z.enum([
+      'SHIPPING_COST_KNOWN',
+      'SHIPPING_COST_REQUIRES_LOCATION',
+      'SHIPPING_COST_UNKNOWN',
+      'SHIPPING_UNAVAILABLE_TO_DESTINATION',
+      'LOCAL_PICKUP_ONLY',
+      'NO_FULFILLMENT_DATA',
+    ]),
+  })
+  .describe("Why the connector classified the listing's fulfillment the way it did.");
+
+/** The derived fulfillment fields shared by listings, search rows and variations. */
+const fulfillmentFieldsShape = {
+  fulfillmentOptions: z
+    .array(fulfillmentOptionSchema)
+    .describe(
+      'Every fulfillment method eBay exposes. Shipping and local pickup can both be present; ' +
+        'never treat them as mutually exclusive.',
+    ),
+  shippingAvailable: z.boolean(),
+  localPickupAvailable: z.boolean(),
+  localPickupOnly: z
+    .boolean()
+    .describe('True only when no shippable option exists for the requested destination.'),
+  shippingCost: moneySchema
+    .optional()
+    .describe("Cheapest known shipped-delivery cost; never local pickup's zero cost."),
+  shippingCostKnown: z.boolean(),
+  shippingCostRequiresLocation: z
+    .boolean()
+    .describe(
+      'True when shipping exists but eBay needs a buyer country/postal code to price it. ' +
+        'This is not the same as shipping being unavailable.',
+    ),
+};
 
 const returnTermsSchema = z.object({
   returnsAccepted: z.boolean().optional(),
@@ -221,15 +334,24 @@ const listingSchema = z
     seller: sellerSchema,
     itemLocation: locationSchema,
 
-    shippingOptions: z.array(shippingOptionSchema),
-    lowestShippingCost: moneySchema.optional(),
+    shippingOptions: z
+      .array(shippingOptionSchema)
+      .describe('Raw eBay shipping quotes, local-pickup rows included. Prefer fulfillmentOptions.'),
+    ...fulfillmentFieldsShape,
+    minEstimatedDeliveryDate: z.string().optional(),
+    maxEstimatedDeliveryDate: z.string().optional(),
+    lowestShippingCost: moneySchema
+      .optional()
+      .describe('Alias of shippingCost, kept for backwards compatibility.'),
     estimatedDeliveredTotal: moneySchema
       .optional()
       .describe(
-        'Current price (or current bid for auctions) plus the cheapest known shipping option. ' +
-          'Absent when eBay only quotes calculated shipping and no buyer location is configured.',
+        'Current price (or current bid for auctions) plus the cheapest known shipped-delivery ' +
+          'cost. Absent when the shipped cost is unknown, e.g. calculated shipping with no ' +
+          'buyer location; local pickup never contributes a zero cost here.',
       ),
     shipsToCountries: z.array(z.string()),
+    fulfillmentDiagnostics: fulfillmentDiagnosticsSchema,
 
     returnTerms: returnTermsSchema.optional(),
     availability: availabilitySchema.optional(),
@@ -290,6 +412,9 @@ const listingSummarySchema = z
     conditionId: z.string().optional(),
     seller: sellerSchema,
     itemLocation: locationSchema,
+    ...fulfillmentFieldsShape,
+    minEstimatedDeliveryDate: z.string().optional(),
+    maxEstimatedDeliveryDate: z.string().optional(),
     lowestShippingCost: moneySchema.optional(),
     estimatedDeliveredTotal: moneySchema.optional(),
     itemCreationDate: z.string().optional(),
@@ -332,6 +457,9 @@ const itemGroupVariationSchema = z.object({
   active: z.boolean(),
   seller: sellerSchema,
   shippingOptions: z.array(shippingOptionSchema),
+  ...fulfillmentFieldsShape,
+  minEstimatedDeliveryDate: z.string().optional(),
+  maxEstimatedDeliveryDate: z.string().optional(),
   lowestShippingCost: moneySchema.optional(),
   estimatedDeliveredTotal: moneySchema.optional(),
   imageUrl: z.string().optional(),
@@ -379,10 +507,13 @@ export const getListingTool = defineTool({
     'carries the group with every purchasable variation instead of a single listing. Only ' +
     'active-listing data is available; the connector cannot retrieve sold or completed prices.',
   kind: 'read',
-  inputSchema: z.object({
-    item: itemReference,
-    marketplaceId: marketplaceId.optional(),
-  }),
+  inputSchema: withDestinationRule(
+    z.object({
+      item: itemReference,
+      marketplaceId: marketplaceId.optional(),
+      ...destinationInputShape,
+    }),
+  ),
   outputSchema: z.object({
     kind: z
       .enum(['listing', 'itemGroup'])
@@ -398,6 +529,10 @@ export const getListingTool = defineTool({
     const resolved = await services.listings.resolveItem({
       item: input.item,
       ...(input.marketplaceId === undefined ? {} : { marketplaceId: input.marketplaceId }),
+      ...(input.deliveryCountry === undefined ? {} : { deliveryCountry: input.deliveryCountry }),
+      ...(input.deliveryPostalCode === undefined
+        ? {}
+        : { deliveryPostalCode: input.deliveryPostalCode }),
     });
     const { reference } = resolved;
     return {
@@ -433,19 +568,22 @@ export const getItemGroupTool = defineTool({
     'itemGroupType set, or when ebay_get_listing reported kind="itemGroup". Take a variation ' +
     "itemId from the result to fetch that single variation's full detail with ebay_get_listing.",
   kind: 'read',
-  inputSchema: z.object({
-    itemGroup: z
-      .string()
-      .min(1)
-      .max(2048)
-      .describe(
-        'An eBay item group id (142373490668), the parent listing URL ' +
-          '(https://www.ebay.com/itm/142373490668), an eBay app mobile share link ' +
-          '(https://ebay.io/m/...), a Browse item id of one of the variations ' +
-          '(v1|142373490668|623456789012), or an itemGroupHref containing item_group_id.',
-      ),
-    marketplaceId: marketplaceId.optional(),
-  }),
+  inputSchema: withDestinationRule(
+    z.object({
+      itemGroup: z
+        .string()
+        .min(1)
+        .max(2048)
+        .describe(
+          'An eBay item group id (142373490668), the parent listing URL ' +
+            '(https://www.ebay.com/itm/142373490668), an eBay app mobile share link ' +
+            '(https://ebay.io/m/...), a Browse item id of one of the variations ' +
+            '(v1|142373490668|623456789012), or an itemGroupHref containing item_group_id.',
+        ),
+      marketplaceId: marketplaceId.optional(),
+      ...destinationInputShape,
+    }),
+  ),
   outputSchema: z.object({
     itemGroup: itemGroupSchema,
     reference: itemGroupReferenceSchema,
@@ -454,6 +592,10 @@ export const getItemGroupTool = defineTool({
     const { itemGroup, reference } = await services.listings.getItemGroup({
       itemGroup: input.itemGroup,
       ...(input.marketplaceId === undefined ? {} : { marketplaceId: input.marketplaceId }),
+      ...(input.deliveryCountry === undefined ? {} : { deliveryCountry: input.deliveryCountry }),
+      ...(input.deliveryPostalCode === undefined
+        ? {}
+        : { deliveryPostalCode: input.deliveryPostalCode }),
     });
     return {
       itemGroup: writable(itemGroup),
@@ -479,63 +621,63 @@ export const searchListingsTool = defineTool({
     'listings, so treat them as asking prices rather than realised prices. Every row reports ' +
     'whether it is still active.',
   kind: 'read',
-  inputSchema: z.object({
-    query: z
-      .string()
-      .min(1)
-      .max(350)
-      .optional()
-      .describe(
-        'Keywords, e.g. "sega saturn console japanese". Required unless categoryIds is set.',
-      ),
-    categoryIds: z
-      .array(z.string().regex(/^\d{1,15}$/))
-      .max(10)
-      .optional()
-      .describe('eBay category ids to restrict the search to.'),
-    minPrice: z.number().min(0).max(1_000_000).optional().describe('Minimum item price.'),
-    maxPrice: z.number().min(0).max(1_000_000).optional().describe('Maximum item price.'),
-    currency: z
-      .string()
-      .regex(/^[A-Za-z]{3}$/)
-      .optional()
-      .describe('ISO 4217 currency for the price filter. Defaults to USD.'),
-    conditions: conditionsFilter,
-    conditionIds: conditionIdsFilter,
-    auctionOnly: z.boolean().optional().describe('Return only auction listings.'),
-    buyItNowOnly: z.boolean().optional().describe('Return only fixed-price listings.'),
-    acceptsBestOfferOnly: z.boolean().optional().describe('Return only listings accepting offers.'),
-    freeShippingOnly: z.boolean().optional().describe('Return only listings with free delivery.'),
-    returnsAcceptedOnly: z
-      .boolean()
-      .optional()
-      .describe('Return only listings that accept returns.'),
-    itemLocationCountry: countryCode.optional().describe('Country the item is located in.'),
-    deliveryCountry: countryCode.optional().describe('Country the buyer wants delivery to.'),
-    deliveryPostalCode: z
-      .string()
-      .max(20)
-      .optional()
-      .describe('Buyer postal code; improves shipping-cost accuracy. Requires deliveryCountry.'),
-    sellers: z
-      .array(z.string().max(64))
-      .max(20)
-      .optional()
-      .describe('Restrict to these eBay seller usernames.'),
-    excludeSellers: z.array(z.string().max(64)).max(20).optional(),
-    excludeCategoryIds: z
-      .array(z.string().regex(/^\d{1,15}$/))
-      .max(10)
-      .optional(),
-    searchInDescription: z
-      .boolean()
-      .optional()
-      .describe('Also match the listing description, not just the title. Requires query.'),
-    marketplaceId: marketplaceId.optional(),
-    sort,
-    limit: searchLimit,
-    offset: z.number().int().min(0).max(1000).default(0).describe('Pagination offset.'),
-  }),
+  inputSchema: withDestinationRule(
+    z.object({
+      query: z
+        .string()
+        .min(1)
+        .max(350)
+        .optional()
+        .describe(
+          'Keywords, e.g. "sega saturn console japanese". Required unless categoryIds is set.',
+        ),
+      categoryIds: z
+        .array(z.string().regex(/^\d{1,15}$/))
+        .max(10)
+        .optional()
+        .describe('eBay category ids to restrict the search to.'),
+      minPrice: z.number().min(0).max(1_000_000).optional().describe('Minimum item price.'),
+      maxPrice: z.number().min(0).max(1_000_000).optional().describe('Maximum item price.'),
+      currency: z
+        .string()
+        .regex(/^[A-Za-z]{3}$/)
+        .optional()
+        .describe('ISO 4217 currency for the price filter. Defaults to USD.'),
+      conditions: conditionsFilter,
+      conditionIds: conditionIdsFilter,
+      auctionOnly: z.boolean().optional().describe('Return only auction listings.'),
+      buyItNowOnly: z.boolean().optional().describe('Return only fixed-price listings.'),
+      acceptsBestOfferOnly: z
+        .boolean()
+        .optional()
+        .describe('Return only listings accepting offers.'),
+      freeShippingOnly: z.boolean().optional().describe('Return only listings with free delivery.'),
+      returnsAcceptedOnly: z
+        .boolean()
+        .optional()
+        .describe('Return only listings that accept returns.'),
+      itemLocationCountry: countryCode.optional().describe('Country the item is located in.'),
+      ...destinationInputShape,
+      sellers: z
+        .array(z.string().max(64))
+        .max(20)
+        .optional()
+        .describe('Restrict to these eBay seller usernames.'),
+      excludeSellers: z.array(z.string().max(64)).max(20).optional(),
+      excludeCategoryIds: z
+        .array(z.string().regex(/^\d{1,15}$/))
+        .max(10)
+        .optional(),
+      searchInDescription: z
+        .boolean()
+        .optional()
+        .describe('Also match the listing description, not just the title. Requires query.'),
+      marketplaceId: marketplaceId.optional(),
+      sort,
+      limit: searchLimit,
+      offset: z.number().int().min(0).max(1000).default(0).describe('Pagination offset.'),
+    }),
+  ),
   outputSchema: z.object({
     listings: z.array(listingSummarySchema),
     total: z.number().optional().describe('Total matches eBay reports, which may exceed limit.'),

@@ -1,0 +1,25 @@
+{
+  "itemId": "v1|100000000003|0",
+  "title": "Local pickup only",
+  "price": {
+    "value": "40.00",
+    "currency": "USD"
+  },
+  "shippingOptions": [
+    {
+      "shippingServiceCode": "Local Pickup",
+      "type": "Local Pickup",
+      "shippingCostType": "FIXED",
+      "shippingCost": {
+        "value": "0.00",
+        "currency": "USD"
+      }
+    }
+  ],
+  "estimatedAvailabilities": [
+    {
+      "estimatedAvailabilityStatus": "IN_STOCK",
+      "deliveryOptions": ["SELLER_ARRANGED_LOCAL_PICKUP"]
+    }
+  ]
+}

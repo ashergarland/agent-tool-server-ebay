@@ -134,6 +134,36 @@ describe('tool input validation', () => {
     ).rejects.toThrowError(expect.objectContaining({ code: 'bad_request' }) as unknown);
   });
 
+  it('rejects a delivery postal code supplied without its country', async () => {
+    const { services } = buildServices();
+    for (const [tool, input] of [
+      ['ebay_get_listing', { item: '407111131587' }],
+      ['ebay_get_item_group', { itemGroup: '142373490668' }],
+      ['ebay_search_listings', { query: 'ps2' }],
+    ] as const) {
+      try {
+        await registry.invoke(tool, { ...input, deliveryPostalCode: '19406' }, services, context);
+        expect.unreachable();
+      } catch (error) {
+        const failure = error as { code: string; details: { issues: { path: string }[] } };
+        expect(failure.code).toBe('bad_request');
+        expect(failure.details.issues[0]?.path).toBe('deliveryPostalCode');
+      }
+    }
+  });
+
+  it('accepts a delivery postal code when the country is supplied too', async () => {
+    const { services } = buildServices();
+    await expect(
+      registry.invoke(
+        'ebay_get_listing',
+        { item: '407111131587', deliveryCountry: 'US', deliveryPostalCode: '19406' },
+        services,
+        context,
+      ),
+    ).resolves.toBeDefined();
+  });
+
   it('rejects a search limit beyond the schema maximum', async () => {
     const { services } = buildServices();
     await expect(

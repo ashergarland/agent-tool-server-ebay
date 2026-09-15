@@ -1,0 +1,43 @@
+{
+  "itemId": "v1|100000000007|0",
+  "title": "Several shipping services",
+  "price": {
+    "value": "60.00",
+    "currency": "USD"
+  },
+  "shippingOptions": [
+    {
+      "shippingServiceCode": "USPS Priority Mail",
+      "type": "USPS Priority Mail",
+      "shippingCostType": "FIXED",
+      "shippingCost": {
+        "value": "12.99",
+        "currency": "USD"
+      },
+      "minEstimatedDeliveryDate": "2026-09-07T07:00:00.000Z",
+      "maxEstimatedDeliveryDate": "2026-09-09T07:00:00.000Z"
+    },
+    {
+      "shippingServiceCode": "USPS Ground Advantage",
+      "type": "USPS Ground Advantage",
+      "shippingCostType": "FIXED",
+      "shippingCost": {
+        "value": "7.25",
+        "currency": "USD"
+      },
+      "minEstimatedDeliveryDate": "2026-09-10T07:00:00.000Z",
+      "maxEstimatedDeliveryDate": "2026-09-15T07:00:00.000Z"
+    },
+    {
+      "shippingServiceCode": "UPS Next Day Air",
+      "type": "UPS Next Day Air",
+      "shippingCostType": "FIXED",
+      "shippingCost": {
+        "value": "41.10",
+        "currency": "USD"
+      },
+      "minEstimatedDeliveryDate": "2026-09-06T07:00:00.000Z",
+      "maxEstimatedDeliveryDate": "2026-09-06T07:00:00.000Z"
+    }
+  ]
+}

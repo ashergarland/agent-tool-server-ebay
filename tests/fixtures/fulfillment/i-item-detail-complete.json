@@ -1,0 +1,36 @@
+{
+  "itemId": "v1|100000000009|0",
+  "title": "Item detail with complete shipping",
+  "price": {
+    "value": "75.00",
+    "currency": "USD"
+  },
+  "shippingOptions": [
+    {
+      "shippingServiceCode": "FedEx Home Delivery",
+      "type": "FedEx Home Delivery",
+      "shippingCostType": "CALCULATED",
+      "shippingCost": {
+        "value": "14.20",
+        "currency": "USD"
+      },
+      "minEstimatedDeliveryDate": "2026-09-09T07:00:00.000Z",
+      "maxEstimatedDeliveryDate": "2026-09-12T07:00:00.000Z"
+    },
+    {
+      "shippingServiceCode": "Local Pickup",
+      "type": "Local Pickup",
+      "shippingCostType": "FIXED",
+      "shippingCost": {
+        "value": "0.00",
+        "currency": "USD"
+      }
+    }
+  ],
+  "estimatedAvailabilities": [
+    {
+      "estimatedAvailabilityStatus": "IN_STOCK",
+      "deliveryOptions": ["SHIP_TO_HOME", "IN_STORE_PICKUP"]
+    }
+  ]
+}

@@ -1,0 +1,28 @@
+{
+  "itemId": "v1|100000000005|0",
+  "title": "Calculated shipping, buyer postal code supplied",
+  "price": {
+    "value": "150.00",
+    "currency": "USD"
+  },
+  "shippingOptions": [
+    {
+      "shippingServiceCode": "UPS Ground",
+      "type": "UPS Ground",
+      "shippingCarrierCode": "UPS",
+      "shippingCostType": "CALCULATED",
+      "shippingCost": {
+        "value": "18.35",
+        "currency": "USD"
+      },
+      "minEstimatedDeliveryDate": "2026-09-10T07:00:00.000Z",
+      "maxEstimatedDeliveryDate": "2026-09-14T07:00:00.000Z"
+    }
+  ],
+  "estimatedAvailabilities": [
+    {
+      "estimatedAvailabilityStatus": "IN_STOCK",
+      "deliveryOptions": ["SHIP_TO_HOME"]
+    }
+  ]
+}

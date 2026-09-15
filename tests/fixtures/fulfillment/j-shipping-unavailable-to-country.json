@@ -1,0 +1,41 @@
+{
+  "itemId": "v1|100000000010|0",
+  "title": "Not shipped to the requested country",
+  "price": {
+    "value": "99.00",
+    "currency": "USD"
+  },
+  "shippingOptions": [
+    {
+      "shippingServiceCode": "USPS Ground Advantage",
+      "type": "USPS Ground Advantage",
+      "shippingCostType": "FIXED",
+      "shippingCost": {
+        "value": "9.00",
+        "currency": "USD"
+      }
+    }
+  ],
+  "shipToLocations": {
+    "regionIncluded": [
+      {
+        "regionName": "United States",
+        "regionId": "US",
+        "regionType": "COUNTRY"
+      }
+    ],
+    "regionExcluded": [
+      {
+        "regionName": "Germany",
+        "regionId": "DE",
+        "regionType": "COUNTRY"
+      }
+    ]
+  },
+  "estimatedAvailabilities": [
+    {
+      "estimatedAvailabilityStatus": "IN_STOCK",
+      "deliveryOptions": ["SHIP_TO_HOME"]
+    }
+  ]
+}
